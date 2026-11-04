@@ -60,6 +60,10 @@ node_modules/
 cloudflare/dist/
 cloudflare/dist-test/
 cloudflare/dist-worker/
+cloudflare/cron-worker/dist/
+cloudflare/cron-worker/dist-worker/
+cloudflare/**/dist/
+cloudflare/**/dist-*/
 cloudflare/.wrangler/
 .wrangler/
 npm-debug.log*
