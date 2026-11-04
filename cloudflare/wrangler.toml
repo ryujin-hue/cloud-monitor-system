@@ -27,7 +27,7 @@ pages_build_output_dir = "dist"
 # The single KV namespace that holds every piece of backend state.
 [[kv_namespaces]]
 binding = "KV"
-id = "11111111111111111111111111111111"
+id = "bbba027387254088ab104dde7fe7c83f"
 
 [vars]
 # Comma separated list of browser origins that may call the API. Native Android apps do

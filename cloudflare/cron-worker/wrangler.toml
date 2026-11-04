@@ -20,7 +20,7 @@ crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "KV"
-id = "11111111111111111111111111111111"
+id = "bbba027387254088ab104dde7fe7c83f"
 
 [vars]
 PUSH_ENABLED = "true"

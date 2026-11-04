@@ -1,11 +1,13 @@
 import { isAuthorized } from "../../src/auth";
 import { errorResponse, jsonResponse, methodNotAllowed } from "../../src/cors";
-import { HEARTBEAT_BUCKET_MS, heartbeatBucket } from "../../src/kvKeys";
+import { heartbeatBucket } from "../../src/kvKeys";
 import {
-  readDevices,
-  readHeartbeats,
-  writeDevices,
-  writeHeartbeats,
+  bucketMsFor,
+  readDevice,
+  readDeviceIndex,
+  readHeartbeat,
+  writeDevice,
+  writeHeartbeat,
 } from "../../src/state";
 import type { DeviceRecord, Env, Heartbeat, HeartbeatRecord } from "../../src/types";
 
@@ -21,6 +23,9 @@ import type { DeviceRecord, Env, Heartbeat, HeartbeatRecord } from "../../src/ty
  *
  * The heartbeat also doubles as the pairing channel: the 6-digit code shown on the cloud
  * phone travels with it.
+ *
+ * The device record itself lives in its OWN key (`cloud-monitor:device:<id>`), so two
+ * cloud phones can never overwrite each other's registration.
  */
 export const onRequestPost = async ({
   request,
@@ -45,14 +50,15 @@ export const onRequestPost = async ({
   }
 
   const now = Date.now();
-  const bucket = heartbeatBucket(now);
-
-  const devices = await readDevices(env);
-  const heartbeats = await readHeartbeats(env);
-
-  let devicesChanged = false;
   const deviceId = heartbeat.deviceId;
-  const existing: DeviceRecord | undefined = devices[deviceId];
+
+  // The bucket length depends on the fleet size, so that the daily write budget is
+  // respected no matter how many cloud phones are monitored.
+  const index = await readDeviceIndex(env);
+  const bucketMs = bucketMsFor(Object.keys(index).length || 1);
+  const bucket = heartbeatBucket(now, bucketMs);
+
+  const existing = await readDevice(env, deviceId);
   const device: DeviceRecord = existing ?? {
     deviceId,
     label: "",
@@ -66,45 +72,45 @@ export const onRequestPost = async ({
     heartbeatIntervalMs: 60_000,
   };
 
-  if (!existing) {
-    devicesChanged = true;
-  }
+  let changed = existing === undefined;
   if (heartbeat.label && heartbeat.label !== device.label) {
     device.label = heartbeat.label;
-    devicesChanged = true;
+    changed = true;
   }
   if (heartbeat.appVersion && heartbeat.appVersion !== device.appVersion) {
     device.appVersion = heartbeat.appVersion;
-    devicesChanged = true;
+    changed = true;
   }
   if ((heartbeat.versionCode ?? 0) !== device.versionCode) {
     device.versionCode = heartbeat.versionCode ?? 0;
-    devicesChanged = true;
+    changed = true;
   }
   const watched = (heartbeat.watchedPackages ?? []).slice().sort();
   if (watched.join(",") !== (device.watchedPackages ?? []).slice().sort().join(",")) {
     device.watchedPackages = watched;
-    devicesChanged = true;
+    changed = true;
   }
   if (heartbeat.pairingCode !== undefined && heartbeat.pairingCode !== device.pairingCode) {
     device.pairingCode = heartbeat.pairingCode ?? null;
     device.pairingExpiresAt = heartbeat.pairingExpiresAt ?? null;
-    devicesChanged = true;
+    changed = true;
   }
   device.updatedAt = now;
 
-  if (devicesChanged) {
-    await writeDevices(env, devices);
+  if (changed) {
+    await writeDevice(env, device);
   }
 
-  // Only write the heartbeat key when the bucket changed: this is the write budget.
-  const current = heartbeats[deviceId];
+  // The liveness record lives in its OWN key, so two cloud phones can never overwrite
+  // each other. It is written at most once per bucket.
+  const current = await readHeartbeat(env, deviceId);
   let recorded = false;
-  if (!current || current.bucket !== bucket) {
+  if (!current || current.bucket !== bucket || current.bucketMs !== bucketMs) {
     const record: HeartbeatRecord = {
       deviceId,
       lastSeenAt: now,
       bucket,
+      bucketMs,
       seq: heartbeat.seq ?? 0,
       appVersion: heartbeat.appVersion ?? "",
       versionCode: heartbeat.versionCode ?? 0,
@@ -114,8 +120,7 @@ export const onRequestPost = async ({
       watchedPackages: watched,
       uptimeMillis: heartbeat.uptimeMillis ?? 0,
     };
-    heartbeats[deviceId] = record;
-    await writeHeartbeats(env, heartbeats);
+    await writeHeartbeat(env, record);
     recorded = true;
   }
 
@@ -123,7 +128,7 @@ export const onRequestPost = async ({
     ok: true,
     recorded,
     bucket,
-    bucketMs: HEARTBEAT_BUCKET_MS,
+    bucketMs,
     serverTime: now,
   });
 };

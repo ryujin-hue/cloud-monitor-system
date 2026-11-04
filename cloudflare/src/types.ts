@@ -149,11 +149,21 @@ export interface DeviceRecord {
   heartbeatIntervalMs: number;
 }
 
+/** One entry of the device index. The index only exists to enumerate the devices. */
+export interface DeviceIndexEntry {
+  label: string;
+  updatedAt: number;
+}
+
+export type DeviceIndex = Record<string, DeviceIndexEntry>;
+
 export interface HeartbeatRecord {
   deviceId: string;
   lastSeenAt: number;
   /** Bucket in which the heartbeat was recorded (see HEARTBEAT_BUCKET_MS). */
   bucket: number;
+  /** The bucket length that was used. It grows with the fleet size. */
+  bucketMs: number;
   seq: number;
   appVersion: string;
   versionCode: number;
@@ -247,6 +257,9 @@ export interface Env {
 
   /** API key for Cloud Alert (status, events, register). */
   ALERT_API_KEY: string;
+
+  /** Secret that protects the manual trigger of the cron Worker. */
+  CRON_SECRET?: string;
 
   /** Comma separated list of allowed CORS origins. Empty means "no browser origin allowed". */
   ALLOWED_ORIGINS?: string;

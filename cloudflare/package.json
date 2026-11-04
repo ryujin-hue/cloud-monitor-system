@@ -9,9 +9,9 @@
     "test": "npm run build:test && node --test dist-test/test/*.test.js",
     "prepare:dist": "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/index.html','<!doctype html><title>cloud-monitor-api</title><p>Cloud Monitor API. See /api/status</p>')\"",
     "dry-run:worker": "wrangler deploy --dry-run --config cron-worker/wrangler.toml --outdir dist-worker",
-    "dry-run:pages": "npm run prepare:dist && wrangler pages deploy --dry-run --outdir dist --project-name cloud-monitor-api",
+    "dry-run:pages": "wrangler pages functions build functions --outdir dist/_worker-build --compatibility-date 2026-01-01",
     "deploy:dry-run": "npm run typecheck && npm run dry-run:worker && npm run dry-run:pages",
-    "deploy:pages": "npm run prepare:dist && wrangler pages deploy --outdir dist --project-name cloud-monitor-api",
+    "deploy:pages": "npm run prepare:dist && wrangler pages deploy dist --project-name cloud-monitor-api --branch main",
     "deploy:worker": "wrangler deploy --config cron-worker/wrangler.toml"
   },
   "devDependencies": {

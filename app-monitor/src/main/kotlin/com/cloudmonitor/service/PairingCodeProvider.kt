@@ -20,8 +20,13 @@ class PairingCodeProvider @Inject constructor(
 ) {
 
     companion object {
-        /** How long a generated code stays valid. */
-        const val VALIDITY_MILLIS = 15 * 60 * 1000L
+        /**
+         * How long a generated code stays valid.
+         *
+         * 30 minutes, because every rotation writes the device record to KV and the KV
+         * free plan only allows 1000 writes per day for the whole backend.
+         */
+        const val VALIDITY_MILLIS = 30 * 60 * 1000L
 
         /** Number of digits. */
         const val DIGITS = 6

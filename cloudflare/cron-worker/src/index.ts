@@ -1,25 +1,21 @@
-import {
-  HEARTBEAT_BUCKET_MS,
-  KV_KEYS,
-  KV_TTL,
-  incidentKey,
-} from "../../src/kvKeys";
+import { incidentKey } from "../../src/kvKeys";
 import { reduceIncident } from "../../src/incidents";
 import { pushEvent } from "../../src/push";
 import {
-  kvGetJson,
-  kvPut,
-  readEvents,
+  appendEvents,
+  bucketMsFor,
+  listDeviceRecords,
+  mergeIncident,
+  readHeartbeat,
   readIncidents,
   readSubscriptions,
-  writeIncidents,
+  writeDeviceIndex,
   writeSubscriptions,
 } from "../../src/state";
 import {
   ERROR_CODES,
-  type DeviceRecord,
+  type DeviceIndex,
   type Env,
-  type HeartbeatRecord,
   type IncidentRecord,
   type MonitorEvent,
 } from "../../src/types";
@@ -28,15 +24,18 @@ import {
  * The cron Worker.
  *
  * Pages Functions cannot run on a schedule, so this Worker does the periodic work. Every
- * run it scans every known cloud phone and raises `E-HB-01` for the ones that stopped
- * reporting.
+ * run it
+ *
+ *   1. lists the known cloud phones and REBUILDS the device index (the only writer of
+ *      that key, so it cannot race with anything),
+ *   2. raises `E-HB-01` for the phones that stopped reporting.
  *
  * Detection window
  * ----------------
- * A heartbeat is written to KV at most once per 5 minute bucket, so the backend only knows
- * that a phone was alive inside the current bucket. A phone is therefore reported as
- * offline after `HEARTBEAT_BUCKET_MS * HEARTBEAT_STALE_BUCKETS` (15 minutes) without a
- * new bucket, which is why the cron runs every 5 minutes.
+ * A heartbeat is written to KV at most once per bucket. The bucket length grows with the
+ * fleet size so that the daily write budget is always respected (see
+ * `effectiveBucketMs`). A phone is reported as offline after `HEARTBEAT_STALE_BUCKETS`
+ * buckets without a new one, which is 20 minutes for a small fleet.
  *
  * The Worker is also the only component allowed to originate `E-HB-01`: a cloud phone that
  * sends a forged `E-HB-01` is rejected by the backend.
@@ -49,10 +48,32 @@ export default {
   ): Promise<void> {
     await scanForMissingHeartbeats(env);
   },
-};
 
-/** Number of buckets without a heartbeat after which a device counts as offline. */
-export const HEARTBEAT_STALE_BUCKETS = 3;
+  /**
+   * Manual trigger: `GET https://cloud-monitor-cron.<account>.workers.dev/?key=<CRON_SECRET>`.
+   *
+   * The scheduled run every five minutes is the normal path; this endpoint exists so the
+   * scan can be forced (for example right after a phone was added) and so the operator can
+   * check the backend by hand.
+   */
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+    const secret = env.CRON_SECRET;
+    const provided = url.searchParams.get("key") ?? request.headers.get("x-api-key") ?? "";
+    if (!secret || provided !== secret) {
+      return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const pruned = await pruneUnregisteredTokens(env);
+    const result = await scanForMissingHeartbeats(env);
+    return new Response(JSON.stringify({ ok: true, ...result, prunedTokens: pruned }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  },
+};
 
 /**
  * Scan every device and raise `E-HB-01` for the ones that went silent.
@@ -64,26 +85,33 @@ export async function scanForMissingHeartbeats(env: Env): Promise<{
   reported: number;
 }> {
   const now = Date.now();
-  const devices =
-    (await kvGetJson<Record<string, DeviceRecord>>(env.KV, KV_KEYS.devices())) ?? {};
-  const heartbeats =
-    (await kvGetJson<Record<string, HeartbeatRecord>>(env.KV, KV_KEYS.heartbeats())) ?? {};
-  const incidents = await readIncidents(env);
 
-  const deviceIds = Object.keys(devices);
+  // One KV list request per run: 288 per day, well inside the 1,000 list requests/day of
+  // the free plan.
+  const devices = await listDeviceRecords(env);
+
+  // The index is rebuilt here and ONLY here, so it has exactly one writer and can never
+  // lose an entry to a concurrent write.
+  const index: DeviceIndex = {};
+  for (const device of devices) {
+    index[device.deviceId] = { label: device.label, updatedAt: device.updatedAt };
+  }
+  await writeDeviceIndex(env, index);
+
+  const bucketMs = bucketMsFor(devices.length || 1);
+  const incidents = await readIncidents(env);
   let reported = 0;
 
-  for (const deviceId of deviceIds) {
-    const device = devices[deviceId];
-    const heartbeat = heartbeats[deviceId];
+  for (const device of devices) {
+    const heartbeat = await readHeartbeat(env, device.deviceId);
 
     // A device that has never sent a heartbeat is not "offline", it is "unknown".
     if (!heartbeat) continue;
 
     const age = now - heartbeat.lastSeenAt;
-    if (age <= HEARTBEAT_BUCKET_MS * HEARTBEAT_STALE_BUCKETS) continue;
+    if (age <= bucketMs * HEARTBEAT_STALE_BUCKETS) continue;
 
-    const key = incidentKey(deviceId, null, ERROR_CODES.E_HB_01);
+    const key = incidentKey(device.deviceId, null, ERROR_CODES.E_HB_01);
     const existing = incidents[key];
     if (existing && existing.state === "OPEN") {
       // Already open: one open incident per (device, package, code).
@@ -91,8 +119,8 @@ export async function scanForMissingHeartbeats(env: Env): Promise<{
     }
 
     const event: MonitorEvent = {
-      eventId: `hb-${deviceId}-${heartbeat.bucket}-${now}`,
-      deviceId,
+      eventId: `hb-${device.deviceId}-${heartbeat.bucket}-${now}`,
+      deviceId: device.deviceId,
       type: "DOWN",
       code: ERROR_CODES.E_HB_01,
       packageName: null,
@@ -106,7 +134,7 @@ export async function scanForMissingHeartbeats(env: Env): Promise<{
       metadata: {
         lastHeartbeatAt: String(heartbeat.lastSeenAt),
         silentForMs: String(age),
-        bucketMs: String(HEARTBEAT_BUCKET_MS),
+        bucketMs: String(bucketMs),
       },
     };
 
@@ -115,27 +143,22 @@ export async function scanForMissingHeartbeats(env: Env): Promise<{
     incidents[key] = incident;
 
     // Store the event in the rolling history so Cloud Alert can show it.
-    const events = await readEvents(env);
-    await kvPut(
-      env.KV,
-      KV_KEYS.events(),
-      JSON.stringify({ events: [...events, event].slice(-1000) }),
-      KV_TTL.events,
-    );
+    await appendEvents(env, [event]);
+    await mergeIncident(env, key, incident);
 
     await pushEvent(env, event, incident, device.label);
     incident.lastPushAt = Date.now();
     incident.lastPushEventId = event.eventId;
+    await mergeIncident(env, key, incident);
 
     reported += 1;
   }
 
-  if (reported > 0) {
-    await writeIncidents(env, incidents);
-  }
-
-  return { scanned: deviceIds.length, reported };
+  return { scanned: devices.length, reported };
 }
+
+/** How many buckets without a heartbeat after which a device counts as offline. */
+export const HEARTBEAT_STALE_BUCKETS = 2;
 
 /**
  * Remove FCM tokens that Firebase reported as unregistered.
@@ -148,7 +171,9 @@ export async function pruneUnregisteredTokens(env: Env): Promise<number> {
   let removed = 0;
   for (const subscription of Object.values(subscriptions)) {
     const before = subscription.fcmTokens.length;
-    subscription.fcmTokens = subscription.fcmTokens.filter((token) => !token.startsWith("unregistered:"));
+    subscription.fcmTokens = subscription.fcmTokens.filter(
+      (token) => !token.startsWith("unregistered:"),
+    );
     removed += before - subscription.fcmTokens.length;
   }
   if (removed > 0) {

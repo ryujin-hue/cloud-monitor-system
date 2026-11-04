@@ -1,6 +1,6 @@
 import { isAuthorized } from "../../src/auth";
 import { errorResponse, jsonResponse, methodNotAllowed } from "../../src/cors";
-import { readDevices, readSubscriptions, writeSubscriptions } from "../../src/state";
+import { listDeviceRecords, readSubscriptions, writeSubscriptions } from "../../src/state";
 import type { Env, RegisterRequest, RegisterResponse } from "../../src/types";
 
 /**
@@ -37,7 +37,6 @@ export const onRequestPost = async ({
 
   const now = Date.now();
   const subscriptions = await readSubscriptions(env);
-  const devices = await readDevices(env);
 
   let subscription = subscriptions[body.alertDeviceId];
   if (!subscription) {
@@ -65,11 +64,7 @@ export const onRequestPost = async ({
   let message = "Registered.";
   if (body.pairingCode) {
     const code = body.pairingCode.trim();
-    const match = Object.values(devices).find(
-      (device) =>
-        device.pairingCode === code &&
-        (device.pairingExpiresAt ?? 0) > now,
-    );
+    const match = await findDeviceByPairingCode(env, code, now);
     if (match) {
       if (!subscription.monitorDeviceIds.includes(match.deviceId)) {
         subscription.monitorDeviceIds.push(match.deviceId);
@@ -91,6 +86,28 @@ export const onRequestPost = async ({
   };
   return jsonResponse(request, env, response);
 };
+
+/**
+ * Find the cloud phone that currently shows the given pairing code.
+ *
+ * The device records live in their own keys, so they are read one by one through the
+ * device index. A register call is rare, so the reads are negligible.
+ */
+async function findDeviceByPairingCode(
+  env: Env,
+  code: string,
+  now: number,
+): Promise<{ deviceId: string; label: string } | null> {
+  // One KV list request per pairing attempt: rare enough to stay far inside the
+  // 1,000 list requests/day of the free plan, and it always sees the newest devices.
+  const devices = await listDeviceRecords(env);
+  for (const device of devices) {
+    if (device.pairingCode !== code) continue;
+    if ((device.pairingExpiresAt ?? 0) <= now) continue;
+    return { deviceId: device.deviceId, label: device.label };
+  }
+  return null;
+}
 
 export const onRequestGet = async ({ request, env }: { request: Request; env: Env }) =>
   methodNotAllowed(request, env);
