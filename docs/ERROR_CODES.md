@@ -21,7 +21,7 @@ lists ever differ, so a code can never exist on only one side.
 | `E-204` | App not responding (ANR) | CRITICAL | Cloud Monitor | The app froze. **Requires ANR evidence**: the system "isn't responding" dialog (AccessibilityService) or an ANR state in a privileged dump. |
 | `E-SHARE-01` | Discord screen share stopped | CRITICAL | Cloud Monitor | Discord's screen-share notification was removed and did not come back within the 4 s debounce window. |
 | `E-SHARE-02` | Discord died during screen share | CRITICAL | Cloud Monitor | The Discord process died while a share was active. **Takes precedence over `E-101`.** |
-| `E-HB-01` | Cloud phone stopped reporting | CRITICAL | Backend cron Worker | The cloud phone has not been seen for 15 minutes. To Cloud Alert, an unreachable cloud phone always looks like `E-HB-01`. |
+| `E-HB-01` | Cloud phone stopped reporting | CRITICAL | Backend cron Worker | The cloud phone has not been seen for 2 heartbeat buckets (20 minutes for a fleet of up to four phones; the bucket grows with the fleet). To Cloud Alert, an unreachable cloud phone always looks like `E-HB-01`. Only the backend may originate this code: a cloud phone that sends it is rejected. |
 | `E-NET-01` | Network unavailable | INFO | Cloud Monitor | The cloud phone lost its network. Queued in the offline outbox and delivered later with the **original** timestamp. Never opens an incident and never pushes. |
 
 ---

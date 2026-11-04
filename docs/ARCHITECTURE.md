@@ -53,7 +53,7 @@ The TypeScript mirror in `cloudflare/src/types.ts` is checked against the Kotlin
 | `E-204`    | App not responding (ANR)           | CRITICAL | Cloud Monitor       | The OS "isn't responding" dialog was observed, or the process was seen in an ANR state. **Requires ANR evidence.** |
 | `E-SHARE-01` | Discord screen share stopped     | CRITICAL | Cloud Monitor       | Discord's screen-share notification was removed and did not come back (after a 4 s debounce). |
 | `E-SHARE-02` | Discord died during screen share | CRITICAL | Cloud Monitor       | The Discord process died while a share was active. **Takes precedence over `E-101`.** |
-| `E-HB-01`  | Cloud phone stopped reporting      | CRITICAL | Backend cron Worker | No heartbeat for 15 minutes. To Cloud Alert, an unreachable cloud phone always looks like `E-HB-01`. |
+| `E-HB-01`  | Cloud phone stopped reporting      | CRITICAL | Backend cron Worker | No heartbeat for 2 buckets (20 minutes for a small fleet). To Cloud Alert, an unreachable cloud phone always looks like `E-HB-01`. |
 | `E-NET-01` | Network unavailable                | INFO     | Cloud Monitor       | The cloud phone lost its network. Local only: queued and delivered later with the original timestamp. Never opens an incident, never pushes. |
 
 **Ownership is enforced.** `POST /api/event` rejects any event whose code is not owned by
@@ -129,7 +129,7 @@ Detection details:
 |--------|-------------|-----|
 | Notification removal → push | ≤ 10 s | The listener publishes to an in-memory bus; the foreground service reacts in the same process, enqueues the event in Room and flushes immediately. No WorkManager, no polling. |
 | Process death → push | ≤ one scan interval + 10 s | The detection loop runs every 15 s, so a death is reported within ~25 s. |
-| Heartbeat → `E-HB-01` | not specified | 15 minutes (3 heartbeat buckets) + up to 5 minutes of cron delay. |
+| Heartbeat → `E-HB-01` | not specified | 20 minutes (2 heartbeat buckets) for a fleet of up to four phones, plus up to 5 minutes of cron delay. The bucket grows with the fleet, see section 5. |
 | Clock skew | — | The server clamps `occurredAt` to `receivedAt` (5 minutes of future drift allowed, anything older than 30 days is clamped). The client uses `max(previous.lastEventAt, event.occurredAt)` so a backwards clock never moves an incident backwards. |
 
 ---
@@ -152,18 +152,56 @@ Sources: [Workers KV pricing](https://developers.cloudflare.com/kv/platform/pric
 2026-11). The Workers free plan additionally allows 100,000 requests/day and 10 ms of CPU
 per request.
 
-### The five keys
+### The keys
 
-All state lives in **one** namespace under **five** keys. Fewer keys means fewer writes and
-fewer same-key collisions.
+All state lives in **one** namespace. Everything that belongs to a *cloud phone* is stored
+per device; only genuinely global state is shared.
 
 | Key | Content | TTL | Written when |
 |-----|---------|-----|--------------|
-| `cloud-monitor:devices` | device registry | 1 year | registration or a metadata change |
-| `cloud-monitor:heartbeats` | liveness per device | 1 year | **at most once per 5 minute bucket** |
+| `cloud-monitor:device:<deviceId>` | one device: label, watched packages, version, pairing code | 1 year | a metadata change or a pairing-code rotation |
+| `cloud-monitor:hb:<deviceId>` | liveness of **one** device | 1 year | **at most once per heartbeat bucket** |
+| `cloud-monitor:deviceindex` | `{ deviceId: { label, updatedAt } }` | 1 year | **by the cron Worker only** |
 | `cloud-monitor:incidents` | incident state + push bookkeeping | 1 year | an incident changes state |
 | `cloud-monitor:subscriptions` | alert devices, FCM tokens, subscriptions | 1 year | register / token rotation |
 | `cloud-monitor:events` | rolling history (last 1000 events) | 30 days | an event batch arrives |
+
+#### Why nothing device related is a single shared key
+
+This was found the hard way, in production, during development. Twice.
+
+Workers KV is **eventually consistent**. A read can return a value that is up to ~60 s old.
+A shared key that is written with a read-modify-write therefore loses records whenever two
+writers overlap: the second writer read a stale copy and wrote it back, deleting the first
+writer's entry.
+
+* **First incident — the pairing code disappeared.** The heartbeat endpoint had written the
+  registration with the pairing code; the event endpoint read the same key a moment later,
+  got the stale version and wrote it back, silently deleting it.
+* **Second incident — the device index lost devices.** Five cloud phones that heartbeated
+  in the same second reduced to two in the index, because all five wrote the same
+  `deviceindex` key with a read-modify-write.
+
+The fix has three parts:
+
+* **Every device has its own keys** (`cloud-monitor:device:<id>` and
+  `cloud-monitor:hb:<id>`), so two cloud phones can never overwrite each other.
+* **The device index has exactly one writer** — the cron Worker rebuilds it from a KV
+  list. A key with one writer cannot race with anything.
+* **The event endpoint never writes the device registry.** It only reads it. That removes
+  the read-modify-write race between the two hottest endpoints.
+
+The shared keys that are still written with a read-modify-write (events, incidents,
+subscriptions) use a **merge with verification**: after writing, the key is read again, and
+when our own change did not survive, the merge is retried.
+
+Two more properties fall out of this design:
+
+* The **liveness record is self healing**. Losing one bucket only delays the `E-HB-01`
+  detection by one bucket, because the next bucket writes the record again.
+* The **device index is rebuilt, not patched**. A device that is missing from the index
+  (because it was created 5 seconds ago and the KV key list has not propagated yet) is
+  picked up by the next cron run, at the latest 5 minutes later.
 
 ### The write budget calculation
 
@@ -174,51 +212,78 @@ heartbeat:
 60 s heartbeat  ->  1440 writes/day/device  ->  1 device already blows the 1000/day budget
 ```
 
-**Our strategy: bucket coalescing.** A heartbeat is written to KV only when the 5 minute
-bucket changes. Because *all* devices share the **same** key, the total cost is independent
-of the number of cloud phones:
+**Strategy: bucket coalescing.** A heartbeat is written to KV only when the bucket
+changes. The bucket length is not fixed, it **adapts to the fleet size**:
 
 ```
-writes/day for heartbeats = (24 h * 60 min * 60 s) / (5 min * 60 s) = 288 writes/day
+bucket = 10 min x ceil(devices / 4)          (capped at 60 min)
+
+writes/day for heartbeats = devices x (24 h / bucket)
 ```
 
-Full daily budget for a fleet of **5 cloud phones**:
+| Cloud phones | Bucket | Heartbeat writes/day | `E-HB-01` after |
+|--------------|--------|----------------------|------------------|
+| 1 – 4        | 10 min | 144 per device       | 20 min + cron delay |
+| 5 – 8        | 20 min | 72 per device        | 40 min + cron delay |
+| 9 – 12       | 30 min | 48 per device        | 60 min + cron delay |
+| 13 – 16      | 40 min | 36 per device        | 80 min + cron delay |
+| 17 – 41      | 60 min | 24 per device        | 120 min + cron delay |
+
+The total heartbeat cost therefore stays at or below ~600 writes/day for *any* fleet size
+up to ~41 cloud phones, and the free-plan budget is never the reason a phone goes silent.
+
+Full daily budget for a fleet of **5 cloud phones** (bucket = 20 min):
 
 | Source | Writes/day | Notes |
 |--------|-----------|-------|
-| Heartbeats | 288 | one shared key, one write per bucket, regardless of the fleet size |
-| Device registry | ~5 | one per device when its metadata changes (new device, label, watched packages, pairing code) |
+| Heartbeats | 72 x 5 = 360 | one write per device per bucket, one key per device |
+| Device records | 48 per device = 240 | the pairing code rotates every 30 minutes; everything else changes rarely |
+| Device index | ~1 | rewritten by the cron Worker every 5 minutes (1 list request each) |
 | Incidents | ~2 per incident | one on open, one on close |
 | Events (history) | ~1 per incident batch | one write per `POST /api/event` |
 | Subscriptions | ~5 | one per register call (app start, token rotation, pairing) |
-| **Total, normal operation** | **~305** | ≈ 31 % of the free-plan budget |
-| **Total, a bad week** (20 incidents/day + frequent re-registrations) | ~380 | ≈ 38 % of the budget |
-
-There is room for roughly **2.5×** the normal incident rate before the free plan is
-exhausted.
+| **Total, 1 cloud phone** | **~195** | ≈ 20 % of the free-plan budget |
+| **Total, 4 cloud phones** | **~620** | ≈ 62 % of the free-plan budget |
+| **Total, 5 cloud phones** | **~650** | ≈ 65 % of the free-plan budget |
+| **Total, 40 cloud phones** | **~1,000** | at the limit — use the paid plan above that |
 
 **Reads** are far cheaper (100,000/day) but still budgeted:
 
 | Source | Reads/day |
 |--------|-----------|
-| Heartbeats (1 per heartbeat) | 7,200 for 5 devices at a 60 s interval |
-| Dashboard polling (1 per minute) | 1,440 |
-| Cron (every 5 min × 3 keys) | 864 |
+| Heartbeats (1 per heartbeat, 3 keys each) | 21,600 for 5 devices at a 60 s interval |
+| Dashboard polling (1 per minute x (4 shared keys + 2 keys per device)) | 7,200 for 5 devices |
+| Cron (every 5 min x 1 list + 2 keys per device) | ~2,000 |
 | Events | a few hundred |
-| **Total** | **~10,000** ≈ 10 % of the free-plan budget |
+| **Total** | **~31,000** ≈ 31 % of the free-plan budget |
+
+**List requests** (1,000/day) are the scarcest resource of the three, because they are the
+only way to enumerate the device keys:
+
+| Source | List requests/day |
+|---------|------------------|
+| Cron Worker (rebuilds the device index) | 288 |
+| Pairing lookup (one per pairing attempt) | a handful |
+| **Total** | **~290** ≈ 29 % of the free-plan budget |
 
 ### The deviation we had to make, and why
 
-**Deviation:** heartbeat liveness is recorded with a 5 minute granularity, not per heartbeat.
+**Deviation:** heartbeat liveness is recorded with a bucket granularity (10 minutes for a
+small fleet), not per heartbeat.
 
 *Why:* a per-heartbeat write costs 1440 writes/day/device and the free plan allows 1000
 writes/day **in total**. There is no configuration of "one KV write per heartbeat" that
-fits. Coalescing into 5 minute buckets is the smallest change that keeps the whole fleet
-inside the budget, and it degrades only the *heartbeat-miss* signal.
+fits. Bucketing is the smallest change that keeps the whole fleet inside the budget, and it
+degrades only the *heartbeat-miss* signal.
 
-*What it costs:* `E-HB-01` is raised after 15 minutes of silence instead of after 2-3
-minutes. The detection of an app death is **not** affected: that path goes through the
-event queue, not through the heartbeat key.
+*What it costs:* `E-HB-01` is raised after 20 minutes of silence (for a fleet of up to four
+phones) instead of after 2-3 minutes, and the window grows with the fleet. The detection of
+an app death is **not** affected: that path goes through the event queue, not through the
+heartbeat key.
+
+*Why the bucket is adaptive:* a fixed 10 minute bucket would exceed the free plan at four
+cloud phones (4 x 144 = 576 heartbeats + 4 x 48 device records = 768 writes/day, plus
+incidents and events). Growing the bucket with the fleet keeps the total flat.
 
 *If you need faster heartbeat-miss detection:* switch to the paid plan (1 M writes/month),
 or move the liveness state into a Durable Object, which is not rate limited the same way.
@@ -227,8 +292,9 @@ or move the liveness state into a Durable Object, which is not rate limited the 
 
 Two cloud phones reporting at the same instant would both write `cloud-monitor:events` and
 the second one would receive HTTP 429. Every KV write in this codebase therefore retries
-with a backoff (`src/state.ts`, `kvPut`). A lost event is not acceptable, so we retry
-instead of swallowing the error.
+with a backoff (`src/state.ts`, `kvPut`), and a retried merge **re-reads the key first**,
+so a retry never writes a stale merge. A lost event is not acceptable, so we retry instead
+of swallowing the error.
 
 ### Eventual consistency
 
@@ -265,7 +331,7 @@ the write path.
 | Key storage on device | The API key and the FCM token are encrypted with AES-256/GCM using an Android Keystore key, and only the ciphertext is stored in DataStore. |
 | CORS | Explicit allow-list. An unknown origin is never echoed back. Native apps do not send an `Origin` header. |
 | Firebase | Only the FCM token and the push payload transit through Firebase. No status data. |
-| Pairing | The cloud phone shows a 6-digit code that expires after 15 minutes. Cloud Alert exchanges it for a subscription. |
+| Pairing | The cloud phone shows a 6-digit code that expires after 30 minutes. Cloud Alert exchanges it for a subscription. The code can be rotated at any time from the Cloud Monitor UI. |
 
 **Known limitation:** both API keys are *shared* between all installations of an app. A
 leaked monitor key therefore lets an attacker post events for any device. Per-device keys
@@ -347,8 +413,9 @@ phone, which is not a personal device.
 | Notification Access is revoked | Tier 1 detection dies | The UI blocks until it is granted again; the heartbeat reports the permission state |
 | The device clock is wrong | Incident timestamps are wrong | The server clamps `occurredAt`; the client never moves `lastEventAt` backwards |
 | A Discord fork uses a different notification | The screen share is not detected | The Notification Inspector makes the target configurable, nothing is hard-coded |
-| The pairing code is photographed | Someone subscribes to the cloud phone | The code expires after 15 minutes and can be rotated at any time |
+| The pairing code is photographed | Someone subscribes to the cloud phone | The code expires after 30 minutes and can be rotated at any time |
 | KV is eventually consistent | A stale read | The write path is authoritative; reads are only used for reporting |
-| The KV free budget is exhausted | Writes fail with HTTP 1101 | The heartbeat coalescing keeps normal usage at ~31 % of the budget; every write retries on 429 |
+| The KV free budget is exhausted | Writes fail with HTTP 1101 | The heartbeat bucket grows with the fleet, so the total stays flat (~600 writes/day for the heartbeats); every write retries on 429 |
+| Two cloud phones write at the same instant | One overwrites the other | Every device has its own keys, and the device index has exactly one writer (the cron Worker). This was a real bug: 5 phones became 2 |
 | The release key is lost | No APK can ever update an installed one | The key is backed up outside the repository; see the README |
 | `E-101` false positives on tier 1 | A noisy alert | Tier 1 is reported with LOW confidence and the UI shows the tier, so the user can judge it |

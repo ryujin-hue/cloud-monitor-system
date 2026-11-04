@@ -160,7 +160,25 @@ To enable push:
    The backend signs the FCM HTTP v1 JWT with WebCrypto — there is no `firebase-admin`
    dependency.
 
-### 3.4 Deploy
+### 3.4 The cron Worker
+
+Pages Functions cannot run on a schedule, so one Worker does the periodic work: it
+rebuilds the device index and raises `E-HB-01` for cloud phones that stopped reporting.
+
+```bash
+cd cloudflare
+
+npx wrangler secret put CRON_SECRET   # protects the manual trigger
+```
+
+Its schedule (`*/5 * * * *`) is configured in `cloudflare/cron-worker/wrangler.toml`. The
+Worker can also be triggered by hand, which is useful right after a phone was added:
+
+```bash
+curl "https://cloud-monitor-cron.<account>.workers.dev/?key=<CRON_SECRET>"
+```
+
+### 3.5 Deploy
 
 ```bash
 cd cloudflare
@@ -168,11 +186,14 @@ cd cloudflare
 npm run typecheck        # tsc --noEmit
 npm test                 # unit tests
 npm run dry-run:worker   # wrangler deploy --dry-run (cron Worker)
-npm run dry-run:pages    # wrangler pages deploy --dry-run (Pages project)
+npm run dry-run:pages    # wrangler pages functions build (Pages project)
 
 npm run deploy:worker    # cron Worker
 npm run deploy:pages     # Pages project
 ```
+
+> `wrangler secret put` only takes effect on the **next deployment**: always redeploy
+> after setting or changing a secret.
 
 Local development:
 
@@ -180,6 +201,25 @@ Local development:
 cp .dev.vars.example .dev.vars   # fill in the keys
 npx wrangler pages dev dist
 ```
+
+### 3.6 How the state is stored
+
+Everything lives in **one** KV namespace. Everything that belongs to a cloud phone is
+stored **per device**, because Workers KV is eventually consistent and a shared key that
+is written with a read-modify-write loses records when two writers overlap:
+
+| Key | Content |
+|-----|---------|
+| `cloud-monitor:device:<deviceId>` | one device: label, watched packages, version, pairing code |
+| `cloud-monitor:hb:<deviceId>` | liveness of one device, written at most once per bucket |
+| `cloud-monitor:deviceindex` | the list of known devices — written **only** by the cron Worker |
+| `cloud-monitor:incidents` | incident state and push bookkeeping |
+| `cloud-monitor:subscriptions` | alert phones, FCM tokens, subscriptions |
+| `cloud-monitor:events` | rolling history of the last 1000 events |
+
+The write budget of the free plan (1,000 writes/day) is the reason the heartbeat is
+bucketed and the bucket **grows with the fleet**: one cloud phone needs 144 writes/day, 41
+phones still fit. See `docs/ARCHITECTURE.md` section 5 for the full calculation.
 
 ---
 
@@ -268,7 +308,7 @@ Every push to `main`:
 4. **Choose apps** → pick the packages to watch.
 5. **Notification inspector** → start a Discord screen share, then pick the matching
    notification ("Use as Discord target"). Nothing about Discord is hard-coded.
-6. The dashboard shows the **6-digit pairing code** and the device id. It expires after 15
+6. The dashboard shows the **6-digit pairing code** and the device id. It expires after 30
    minutes; "New code" rotates it.
 
 ### Cloud Alert (on your personal phone)
@@ -343,7 +383,7 @@ adb install -r cloud-monitor-1.0.2.apk
 - [ ] The release keystore is backed up **outside** the repository, together with its three passwords.
 - [ ] `google-services.json` and the service account JSON are **not** in the repository.
 - [ ] The GitHub secrets `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD` are set.
-- [ ] The pairing code is not written down anywhere permanent (it expires after 15 minutes).
+- [ ] The pairing code is not written down anywhere permanent (it expires after 30 minutes).
 
 ---
 
