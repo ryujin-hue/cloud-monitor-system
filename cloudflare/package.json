@@ -1,0 +1,23 @@
+{
+  "name": "cloud-monitor-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Pages Functions + cron Worker backend for the Cloud Monitor system",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.check.json",
+    "build:test": "tsc -p tsconfig.test.json",
+    "test": "npm run build:test && node --test dist-test/test/*.test.js",
+    "prepare:dist": "node -e \"const fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/index.html','<!doctype html><title>cloud-monitor-api</title><p>Cloud Monitor API. See /api/status</p>')\"",
+    "dry-run:worker": "wrangler deploy --dry-run --config cron-worker/wrangler.toml --outdir dist-worker",
+    "dry-run:pages": "npm run prepare:dist && wrangler pages deploy --dry-run --outdir dist --project-name cloud-monitor-api",
+    "deploy:dry-run": "npm run typecheck && npm run dry-run:worker && npm run dry-run:pages",
+    "deploy:pages": "npm run prepare:dist && wrangler pages deploy --outdir dist --project-name cloud-monitor-api",
+    "deploy:worker": "wrangler deploy --config cron-worker/wrangler.toml"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261103.1",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.157.0",
+    "@types/node": "^22.10.0"
+  }
+}

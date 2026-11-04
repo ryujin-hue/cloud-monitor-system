@@ -1,0 +1,37 @@
+# =============================================================================
+# Cloudflare Pages project: the public API of the Cloud Monitor system.
+#
+# Deploy with:   npx wrangler pages deploy dist --project-name cloud-monitor-api
+#
+# The KV namespace id below is a PLACEHOLDER. Create the namespace and replace it:
+#
+#   npx wrangler kv namespace create cloud-monitor
+#   # -> copy the printed id into this file (and into cron-worker/wrangler.toml)
+#
+# Secrets (never committed):
+#
+#   npx wrangler secret put MONITOR_API_KEY       # key used by Cloud Monitor
+#   npx wrangler secret put ALERT_API_KEY         # key used by Cloud Alert
+#   npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON  # Firebase service account (push)
+#
+# Local development:
+#
+#   cp .dev.vars.example .dev.vars
+#   npx wrangler pages dev dist
+# =============================================================================
+
+name = "cloud-monitor-api"
+compatibility_date = "2026-01-01"
+pages_build_output_dir = "dist"
+
+# The single KV namespace that holds every piece of backend state.
+[[kv_namespaces]]
+binding = "KV"
+id = "11111111111111111111111111111111"
+
+[vars]
+# Comma separated list of browser origins that may call the API. Native Android apps do
+# not send an Origin header, so this only matters for browser based debugging.
+ALLOWED_ORIGINS = ""
+# Set to "false" to disable push delivery (useful while bootstrapping).
+PUSH_ENABLED = "true"

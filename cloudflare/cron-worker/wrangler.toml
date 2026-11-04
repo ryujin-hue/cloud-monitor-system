@@ -1,0 +1,26 @@
+# =============================================================================
+# The cron Worker.
+#
+# Pages Functions cannot run on a schedule, so a separate Worker does the periodic work:
+# it scans every known cloud phone and raises `E-HB-01` when a phone stopped reporting.
+#
+# Deploy with:   npx wrangler deploy --config cron-worker/wrangler.toml
+#
+# The KV namespace id must be the SAME namespace the Pages project uses.
+# =============================================================================
+
+name = "cloud-monitor-cron"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# Every 5 minutes. With a 5 minute heartbeat bucket and a 3 bucket staleness window this
+# means a silent cloud phone is reported after roughly 15 minutes.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "KV"
+id = "11111111111111111111111111111111"
+
+[vars]
+PUSH_ENABLED = "true"

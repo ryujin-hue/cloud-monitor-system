@@ -1,0 +1,29 @@
+# =============================================================================
+# Local development secrets for `wrangler pages dev`.
+#
+# Copy this file to `.dev.vars` (which is gitignored) and fill in real values.
+#
+#   cp .dev.vars.example .dev.vars
+#
+# Generate a key with:
+#   openssl rand -base64 32
+#
+# MONITOR_API_KEY is used by Cloud Monitor for POST /api/event and POST /api/heartbeat.
+# ALERT_API_KEY   is used by Cloud Alert for GET /api/status, GET /api/events and
+#                 POST /api/register.
+# They MUST be different: a leaked alert key could otherwise post fake events.
+# =============================================================================
+
+MONITOR_API_KEY="replace-me-with-a-long-random-monitor-key"
+ALERT_API_KEY="replace-me-with-a-different-long-random-alert-key"
+
+# Comma separated browser origins allowed to call the API. Native Android apps do not
+# send an Origin header and are therefore unaffected by this list.
+ALLOWED_ORIGINS=""
+
+# Set to "false" to disable push delivery while bootstrapping.
+PUSH_ENABLED="true"
+
+# The Firebase service account JSON, used to sign the FCM HTTP v1 JWT.
+# Keep the real file OUT of the repository; paste its content here for local testing.
+FCM_SERVICE_ACCOUNT_JSON=""
