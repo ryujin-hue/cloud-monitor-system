@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cloud Alert</string>
+    <string name="notification_channel_alerts">Cloud alerts</string>
+    <string name="notification_channel_alerts_description">Outage alerts from your cloud phones</string>
+    <string name="notification_channel_service">Alert service</string>
+    <string name="notification_channel_service_description">Keeps the alert app connected</string>
+</resources>
