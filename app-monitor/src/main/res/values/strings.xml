@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cloud Monitor</string>
+    <string name="notification_listener_label">Cloud Monitor (watch notifications)</string>
+    <string name="accessibility_service_label">Cloud Monitor ANR watcher</string>
+    <string name="notification_channel_service">Monitor service</string>
+    <string name="notification_channel_service_description">Keeps the cloud-phone monitor running</string>
+    <string name="notification_channel_alerts">Monitor alerts</string>
+    <string name="notification_channel_alerts_description">Detection results shown on this device</string>
+</resources>
