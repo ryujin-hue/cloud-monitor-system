@@ -33,6 +33,17 @@ jobs:
 
       - name: Set up the Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The default package list of the action contains "tools", which was removed
+          # from the SDK repository and makes the action fail. The platforms and the
+          # build tools are listed explicitly instead.
+          packages: |
+            platform-tools
+            platforms;android-36
+            platforms;android-37.0
+            platforms;android-37.2
+            build-tools;36.0.0
+            build-tools;37.0.0
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -132,6 +143,14 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36
+            platforms;android-37.0
+            platforms;android-37.2
+            build-tools;36.0.0
+            build-tools;37.0.0
       - uses: gradle/actions/setup-gradle@v4
       - name: Enable KVM
         run: |
@@ -144,7 +163,7 @@ jobs:
         with:
           api-level: 35
           arch: x86_64
-          script: ./.scripts/verify-update.sh --with-device
+          script: ./scripts/verify-update.sh --with-device
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
