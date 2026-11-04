@@ -103,7 +103,15 @@ done
 echo
 echo "Creating a synthetic follow-up commit (no branch, no tag, no history rewrite)..."
 TREE="$(git write-tree)"
-SYNTHETIC_COMMIT="$(git commit-tree "${TREE}" -p HEAD -m "chore: synthetic build for the in-place update proof")"
+# `git commit-tree` needs an identity. CI runners have none by default, so the identity
+# is passed explicitly instead of relying on a global git configuration.
+SYNTHETIC_COMMIT="$(
+  GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-cloud-monitor-verify}" \
+  GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-verify@cloud-monitor.invalid}" \
+  GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-cloud-monitor-verify}" \
+  GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-verify@cloud-monitor.invalid}" \
+  git commit-tree "${TREE}" -p HEAD -m "chore: synthetic build for the in-place update proof"
+)"
 NEW_COUNT="$(git rev-list --count "${SYNTHETIC_COMMIT}")"
 NEW_VERSION_NAME="$(grep -E '^MAJOR=' version.properties | cut -d= -f2 | tr -d '[:space:]').$(grep -E '^MINOR=' version.properties | cut -d= -f2 | tr -d '[:space:]').${NEW_COUNT}"
 echo "Building version ${NEW_VERSION_NAME} (versionCode ${NEW_COUNT})"
