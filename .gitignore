@@ -27,7 +27,11 @@ service-account*.json
 # ---------------------------------------------------------------------------
 # Build output
 # ---------------------------------------------------------------------------
-build/
+# NOTE: `/build/` is anchored to the repository root on purpose. A plain `build/`
+# would also match `buildSrc/src/main/kotlin/com/cloudmonitor/build/`, which is
+# SOURCE CODE, not build output.
+/build/
+buildSrc/build/
 */build/
 */*/build/
 .gradle/
