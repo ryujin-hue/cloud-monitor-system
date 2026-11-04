@@ -1,0 +1,152 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test and release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # REQUIRED: versionCode is `git rev-list --count HEAD`, which needs the full history.
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Fail early when the signing secrets are missing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::GitHub secret ${name} is missing. The release build cannot be signed."
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::Refusing to build: without these secrets Gradle would fall back to the"
+            echo "::error::debug key, and such an APK can never update an already published one."
+            exit 1
+          fi
+
+      - name: Show the version this build will publish
+        run: ./scripts/version.sh
+
+      - name: Unit tests
+        run: ./gradlew --stacktrace test
+
+      - name: Assemble the signed release APKs
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew --stacktrace assembleRelease
+
+      - name: Prove that a newer APK updates an older one in place
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./scripts/verify-update.sh
+
+      - name: Upload the APKs as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks
+          path: |
+            app-monitor/build/outputs/apk/release/*.apk
+            app-alert/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Tag and publish the GitHub release
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION_NAME="$(./scripts/version.sh | sed -n 's/^versionName=//p')"
+          TAG="v${VERSION_NAME}"
+          echo "Publishing ${TAG}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "${TAG}" >/dev/null 2>&1; then
+            echo "::warning::Tag ${TAG} already exists, skipping the release creation."
+            exit 0
+          fi
+
+          # Only a tag is created. No commit is ever pushed back to the repository.
+          git tag -a "${TAG}" -m "Release ${VERSION_NAME}"
+          git push origin "${TAG}"
+
+          gh release create "${TAG}" \
+            --title "Cloud Monitor System ${VERSION_NAME}" \
+            --generate-notes \
+            "app-monitor/build/outputs/apk/release/app-monitor-release.apk#cloud-monitor-${VERSION_NAME}.apk" \
+            "app-alert/build/outputs/apk/release/app-alert-release.apk#cloud-alert-${VERSION_NAME}.apk"
+
+  # Optional proof that the data really survives an in-place installation.
+  # It never blocks the release: an emulator is slow and sometimes unavailable.
+  emulator:
+    name: In-place install on an emulator
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run the emulator and install both APKs
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          script: ./.scripts/verify-update.sh --with-device
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
