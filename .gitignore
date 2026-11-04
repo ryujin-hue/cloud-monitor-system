@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Secrets — NEVER commit these
+# ---------------------------------------------------------------------------
+# The release signing key. Losing it means no APK can ever update an installed one.
+release-keystore.jks
+release-keystore.jks.base64
+*.jks
+*.keystore
+keystore.properties
+
+# Firebase configuration.
+google-services.json
+**/google-services.json
+firebase.properties
+
+# Service account credentials.
+service-account*.json
+*-service-account.json
+
+# Local Cloudflare secrets.
+.dev.vars
+.env
+.env.*
+!.env.example
+!.dev.vars.example
+
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+build/
+*/build/
+*/*/build/
+.gradle/
+local.properties
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+captures/
+output/
+
+# ---------------------------------------------------------------------------
+# IDE
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+.kotlin/
+.vscode/
+*.swp
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# Backend
+# ---------------------------------------------------------------------------
+node_modules/
+cloudflare/dist/
+cloudflare/dist-test/
+cloudflare/dist-worker/
+cloudflare/.wrangler/
+.wrangler/
+npm-debug.log*
+yarn-error.log*
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+*.log
