@@ -88,7 +88,7 @@ trap 'rm -rf "${WORK_DIR}"' EXIT
 
 OLD_APKS=()
 for app in "${APPS[@]}"; do
-  apk="$(find "${app}/build/outputs/apk/release" -name '*.apk' | head -1)"
+  apk="$(find "${app}/build/outputs/apk/release" -name '*.apk' -print -quit)"
   if [[ -z "${apk}" ]]; then
     echo "ERROR: no release APK found for ${app}" >&2
     exit 1
@@ -126,7 +126,7 @@ git worktree add --detach "${SYNTHETIC_WORKTREE}" "${SYNTHETIC_COMMIT}" >/dev/nu
 
 NEW_APKS=()
 for app in "${OLD_APKS[@]}"; do
-  apk="$(find "${SYNTHETIC_WORKTREE}/${app}/build/outputs/apk/release" -name '*.apk' | head -1)"
+  apk="$(find "${SYNTHETIC_WORKTREE}/${app}/build/outputs/apk/release" -name '*.apk' -print -quit)"
   if [[ -z "${apk}" ]]; then
     echo "ERROR: no release APK found for ${app} in the synthetic build" >&2
     exit 1
@@ -141,30 +141,39 @@ git worktree prune
 # ---------------------------------------------------------------------------
 # Compare
 # ---------------------------------------------------------------------------
+# NOTE: these helpers deliberately avoid pipes. `aapt dump badging` produces a lot of
+# output; piping it into `head -1` makes aapt die with SIGPIPE, and with `set -o
+# pipefail` that aborts the whole script. The values are parsed with bash instead.
 extract_cert_sha256() {
-  "${APKSIGNER}" verify --print-certs "$1" 2>/dev/null \
-    | grep -i "SHA-256 digest:" \
-    | head -1 \
-    | sed 's/.*SHA-256 digest: //' \
-    | tr -d '[:space:]'
+  local out
+  out="$("${APKSIGNER}" verify --print-certs "$1" 2>/dev/null || true)"
+  if [[ "${out}" =~ SHA-256[[:space:]]digest:[[:space:]]*([0-9a-fA-F]+) ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
 }
 
 extract_package() {
-  "${AAPT}" dump badging "$1" 2>/dev/null | head -1 | sed -E "s/^package: name='([^']+)'.*/\1/"
+  local badging
+  badging="$("${AAPT}" dump badging "$1" 2>/dev/null || true)"
+  if [[ "${badging}" =~ package:\ name=\'([^\']+)\' ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
 }
 
 extract_version_code() {
-  "${AAPT}" dump badging "$1" 2>/dev/null \
-    | grep -oE "versionCode='[0-9]+'" \
-    | head -1 \
-    | grep -oE "[0-9]+"
+  local badging
+  badging="$("${AAPT}" dump badging "$1" 2>/dev/null || true)"
+  if [[ "${badging}" =~ versionCode=\'([0-9]+)\' ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
 }
 
 extract_version_name() {
-  "${AAPT}" dump badging "$1" 2>/dev/null \
-    | grep -oE "versionName='[^']+'" \
-    | head -1 \
-    | sed "s/versionName='//; s/'//"
+  local badging
+  badging="$("${AAPT}" dump badging "$1" 2>/dev/null || true)"
+  if [[ "${badging}" =~ versionName=\'([^\']+)\' ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  fi
 }
 
 FAILED=0
