@@ -12,8 +12,19 @@ your **personal phone**, when a monitored app dies or when a Discord screen shar
 **Firebase** is used **only** to deliver the push messages — no status data ever reaches
 Firebase.
 
-* [Architecture and design decisions](docs/ARCHITECTURE.md)
-* [Error codes](docs/ERROR_CODES.md)
+### Documentation
+
+| Document | Audience |
+|----------|----------|
+| [Panduan Pengguna (Bahasa Melayu)](docs/USER_GUIDE_MS.md) | Beginner user guide in Malay |
+| [User Guide (English)](docs/USER_GUIDE_EN.md) | Beginner user guide in simple English |
+| [Troubleshooting / Penyelesaian Masalah](docs/TROUBLESHOOTING.md) | Crashes, permissions, notifications, Android 16, root, API |
+| [Architecture and design decisions](docs/ARCHITECTURE.md) | Developers (unchanged) |
+| [Error codes](docs/ERROR_CODES.md) | Developers (unchanged) |
+
+> The technical architecture and developer documentation below is preserved from the
+> original project. Only the compatibility target, verified bug fixes and the new user
+> documentation were added.
 
 ---
 
@@ -30,7 +41,8 @@ cloud-monitor-system/
 │   ├── src/                shared TypeScript: types, auth, KV, incidents, FCM, push
 │   └── test/               unit tests (KV key builder, incident state machine, parity)
 ├── scripts/                version, signing setup, update verification
-├── docs/                   ARCHITECTURE.md, ERROR_CODES.md
+├── docs/                   ARCHITECTURE.md, ERROR_CODES.md, USER_GUIDE_MS.md,
+│                           USER_GUIDE_EN.md, TROUBLESHOOTING.md
 ├── .github/workflows/      android.yml, cloudflare.yml
 ├── gradle/libs.versions.toml
 └── version.properties
@@ -42,8 +54,9 @@ cloud-monitor-system/
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| JDK | 17 | AGP 9.x requires JDK 17 or newer |
-| Android SDK | platform 37 + build-tools 37 | `compileSdk`/`targetSdk` = 37 (Android 17) |
+| JDK | 17 or newer | AGP 9.x requires JDK 17+ (build verified with JDK 20) |
+| Android SDK | platforms **37.0 + 37.2** and **36**, build-tools **37.0.0 + 36.0.0** | `compileSdk` = **37** (required by the pinned AndroidX / Compose / Ktor AAR metadata), `targetSdk` = **36 (Android 16)** |
+| Gradle | 9.8.2 (wrapper) | do not use a globally installed Gradle |
 | Node.js | 22 | for the backend |
 | `gh` | any | optional, for creating the repo and setting secrets |
 
@@ -58,9 +71,24 @@ cd cloud-monitor-system
 # Point Gradle at your SDK (or set ANDROID_HOME)
 echo "sdk.dir=/path/to/android-sdk" > local.properties
 
-./gradlew assembleRelease      # both apps
-./gradlew test                 # unit tests
+./gradlew clean
+./gradlew assembleDebug        # both apps (no release keystore required)
+./gradlew test                 # JVM unit tests (shared + both app modules)
+./gradlew lint                 # lint report (non-fatal by design)
+./gradlew assembleRelease      # signed release: needs the keystore secrets, see 4.1
+
+# Optional: override the backend URL at build time
+./gradlew assembleDebug -PbackendBaseUrl=https://your-backend.example.com
 ```
+
+> `local.properties` (`sdk.dir=...`) is machine-specific and gitignored. **`targetSdk` is
+> 36 (Android 16)** — that is the runtime compatibility target. **`compileSdk` is 37**
+> because the pinned AndroidX / Compose / Ktor releases declare `minCompileSdk 37` in their
+> AAR metadata; setting it back to 36 makes `checkDebugAarMetadata` fail. Since AGP 9.4.1
+> does not yet officially support API 37, `gradle.properties` keeps
+> `android.suppressUnsupportedCompileSdk=37` (it only silences the warning — it does **not**
+> change the runtime target). Install SDK platforms `android-37.0` + `android-37.2` before
+> building; see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) §12.
 
 ### Build configuration
 
@@ -68,8 +96,11 @@ echo "sdk.dir=/path/to/android-sdk" > local.properties
 |------|---------|---------|
 | `-PbackendBaseUrl=https://…` | `https://cloud-monitor-api.pages.dev` | the backend the apps talk to. The environment variable `BACKEND_BASE_URL` works too. |
 
-The backend URL is baked into `BuildConfig.BACKEND_BASE_URL` at build time. It can also be
-changed at runtime in the app's settings screen (the API key lives there).
+The backend URL is baked into `BuildConfig.BACKEND_BASE_URL` at build time and is **not**
+editable from inside the app. The **API key** is entered in the app's settings screen at
+runtime and is stored encrypted with Android Keystore — the key and the URL are separate
+things. To point the apps at a different backend you must rebuild them with
+`-PbackendBaseUrl=…` (or `BACKEND_BASE_URL`).
 
 ### Required Android permissions
 
@@ -87,6 +118,32 @@ the onboarding screen stays visible until the two essential ones are granted.
 **OEM autostart.** Xiaomi, Huawei, Oppo, Vivo, Samsung, OnePlus and Asus kill background
 services from their own "auto start" / "protected apps" screens, independently of Android.
 Enable Cloud Monitor there as well, otherwise the monitor will silently die.
+
+### 2.1 Android 16 (API 36) compatibility
+
+Both apps now use **`targetSdk = 36`** (previously 37), which is what opts the app into the
+Android 16 behaviour changes. `compileSdk` stays **37** because the pinned dependency
+versions require it; `compileSdk` only controls which APIs are visible at compile time and
+has no effect on the runtime behaviour listed below. The following official Android 16 /
+recent-platform behaviours were audited against the source:
+
+| Platform behaviour | Applies to | What this project does |
+|--------------------|------------|------------------------|
+| **Edge-to-edge opt-out removed** (`targetSdk 36`) | Android 16 | `enableEdgeToEdge()` + Material 3 `Scaffold` in both activities; no `windowOptOutEdgeToEdgeEnforcement`. |
+| **Predictive back on by default** (`targetSdk 36`) | Android 16 | `android:enableOnBackInvokedCallback="true"` declared; Compose navigation handles back. |
+| **Adaptive layouts** (orientation/resizability ignored on ≥600dp) | Android 16 | No locked orientation or `resizeableActivity` restrictions; Compose layouts are scrollable/adaptive. |
+| **`POST_NOTIFICATIONS` runtime permission** | Android 13+ | Requested with an explanation banner (Cloud Alert) and onboarding row (Cloud Monitor); permanent denial opens `ACTION_APP_NOTIFICATION_SETTINGS`. |
+| **Background FGS start restriction** | Android 12+ | `start()` returns a `StartOutcome`; `BOOT_COMPLETED`, `LOCKED_BOOT_COMPLETED` and `MY_PACKAGE_REPLACED` are the legal exemptions used. WorkManager watchdog is **not** treated as an exemption. |
+| **`ForegroundServiceStartNotAllowedException`** | Android 12+ | Caught and translated into a readable message; the UI never claims success until `isRunning` confirms `startForeground()` succeeded. |
+| **FGS type + type-specific permission** | Android 14+ | `foregroundServiceType="specialUse"`, `FOREGROUND_SERVICE_SPECIAL_USE`, and `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` justification. The 3-arg `startForeground()` is used only on API 34+ (passing `specialUse` on API 29–33 throws). |
+| **`BOOT_COMPLETED` FGS type restrictions** | Android 15+ | `specialUse` is not one of the restricted (`dataSync` / `mediaProcessing`) types; the start result is still checked. |
+| **Job quotas for jobs started from an FGS** | Android 16, all apps | The 15-minute `WatchdogWorker` is quota-bound and does not retry forever; restart is user-initiated. |
+| **PendingIntent mutability** | Android 12+ | All `PendingIntent`s use `FLAG_IMMUTABLE` (or `FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE`). |
+| **Broadcast receiver export** | Android 12+ | `BootReceiver` is `exported="false"` with `RECEIVE_BOOT_COMPLETED`; `PackageReplacedReceiver` is `exported="false"`. |
+| **Safer Intents / Local Network Protection** | Android 16, opt-in | Not enabled; no cross-app implicit intents or LAN sockets are used. Noted as future work. |
+| **16 KB page size** | Android 15/16 devices | Not verifiable in this environment — see *Known limitations*. |
+
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) §9 for the user-facing version.
 
 ---
 
@@ -175,7 +232,8 @@ Its schedule (`*/5 * * * *`) is configured in `cloudflare/cron-worker/wrangler.t
 Worker can also be triggered by hand, which is useful right after a phone was added:
 
 ```bash
-curl "https://cloud-monitor-cron.<account>.workers.dev/?key=<CRON_SECRET>"
+# The secret goes in a HEADER, never in the URL (URLs leak into logs/history/Referer).
+curl -H "x-cron-secret: <CRON_SECRET>" "https://cloud-monitor-cron.<account>.workers.dev/"
 ```
 
 ### 3.5 Deploy
@@ -387,6 +445,85 @@ adb install -r cloud-monitor-1.0.2.apk
 
 ---
 
-## 8. Licence
+## 8. Known limitations
+
+- **No Android 16 device or emulator was available in this build environment.** All
+  Android 16 behaviour changes were verified against the official platform documentation
+  and the source/manifest; runtime behaviour on a real API 36 device is **not yet tested**
+  (see section 9).
+- **16 KB page size.** Some Android 15/16 devices require 16 KB-aligned native
+  libraries. The app uses Firebase Messaging, Ktor/OkHttp and Room; whether every bundled
+  `.so` is 16 KB-aligned must be checked on a real device with
+  `adb shell getconf PAGESIZE` / `zipalign`-style inspection. Not verified here.
+- **`specialUse` foreground service type** is subject to Google Play policy review. This
+  project is distributed as sideloaded APKs, not through Play; if you publish to Play you
+  must justify the type in the declaration.
+- **The WorkManager watchdog cannot restart a foreground service from the background** on
+  Android 12+ unless the user disabled battery optimisation for the app. After a
+  background-start refusal the user must open Cloud Monitor and tap Start.
+- **Tier 1 detection is heuristic.** Without root, "app died" is inferred from ongoing
+  notification removal and usage-event staleness (MEDIUM/LOW confidence). Tier 2 needs a
+  rooted device **and** root granted to this app; an `su` file alone is not enough.
+- **Push is optional.** Without `google-services.json` Firebase is disabled and Cloud
+  Alert only refreshes the dashboard when opened or manually refreshed.
+- **Pairing-attempt limiting is best-effort.** Workers KV is eventually consistent; for a
+  hard brute-force guarantee configure Cloudflare Rate Limiting on `POST /api/register`.
+- **`QUERY_ALL_PACKAGES`** is needed to list installed apps for the package picker; it is
+  restricted by Google Play policy but acceptable for the sideloaded distribution used
+  here.
+- **Special permissions** (Notification access, Usage access, Accessibility, battery
+  optimisation) have no runtime dialog — the user must visit a system Settings screen and
+  some OEMs cache the state.
+- **Safer Intents / Local Network Protection** are opt-in on Android 16 and not enabled;
+  they should be re-evaluated when they become mandatory.
+- **Release signing** requires the four CI secrets. A local build without them falls back
+  to the debug key and produces an APK that **cannot** update a published one.
+- **Unit tests are JVM-only** (no instrumentation / Hilt / end-to-end tests). Room
+  migrations and pure-Kotlin state machines are covered; service startup, permission
+  flows and FCM delivery are not covered by automated tests.
+
+---
+
+## 9. Testing status
+
+> **Honest status — do not describe this build as production-ready.** The commands below
+> were executed in a headless Linux container with Android SDK platforms 36 / 37.0 / 37.2,
+> build-tools 36.0.0 / 37.0.0 and JDK 17. There is **no Android device or emulator** in
+> this environment, so no on-device/instrumentation test was performed.
+
+| Check | Command | Result |
+|-------|---------|--------|
+| Clean | `./gradlew clean` | ✅ BUILD SUCCESSFUL |
+| Debug build (both apps) | `./gradlew assembleDebug` | ✅ BUILD SUCCESSFUL — `app-alert-debug.apk`, `app-monitor-debug.apk` produced |
+| Unit tests | `./gradlew test` | ✅ 38 tests, 0 failures, 0 errors (6 test classes incl. `CancellationGuardTest`, `RootProcessProbeTest`, Room migration tests) |
+| Lint | `./gradlew lint` | ✅ BUILD SUCCESSFUL — 0 errors, 12 warnings (non-fatal by design, `abortOnError=false`). See note below. |
+| Backend typecheck | `npm run typecheck` | ✅ exit 0 |
+| Backend unit tests | `npm test` | ✅ 33/33 passed |
+| Hilt dependency injection | compile-time only (KSP annotation processing) | ✅ compile-time only — runtime graph **NOT TESTED** |
+| Manifest validity | `assembleDebug` manifest merger | ✅ merged successfully |
+| Service start / stop on device | — | **NOT TESTED** (no device/emulator) |
+| Permission flows on device | — | **NOT TESTED** (no device/emulator) |
+| Root detection on a rooted device | — | **NOT TESTED** (no rooted device) |
+| Coroutine cancellation | `CancellationGuardTest`, `RootProcessProbeTest` | ✅ JVM unit tests only — no real service loop tested |
+| API failure handling | code review + backend tests | ⚠️ no end-to-end test |
+| Android 16 (API 36) runtime behaviour | — | **NOT TESTED** (no API 36 device/emulator) |
+| 16 KB page-size compatibility | — | **NOT TESTED** |
+| FCM push delivery | — | **NOT TESTED** (no `google-services.json` / Firebase project) |
+
+The 12 remaining lint warnings are benign and intentional: `OldTargetApi` (targetSdk is
+deliberately 36, not the newest), `UnusedAttribute` / `InlinedApi` (API-33/30 attributes
+guarded by `minSdk 26`), `BatteryLife` (sideloaded app, not distributed via Play),
+`ObsoleteSdkInt`, `UnusedResources`, `MonochromeLauncherIcon` and `UseKtx`. The two
+`NewApi` **errors** for `AppOpsManager.unsafeCheckOpNoThrow` on `minSdk 26` were fixed by
+branching to `checkOpNoThrow` on API 26–28.
+
+> ⚠️ / **NOT TESTED** entries must not be reported as passing. A green CI/local build only
+> proves the code compiles and the JVM unit tests pass; it does **not** prove the apps
+> start, the foreground service survives, or the permission flows work on a real
+> Android 16 device.
+
+---
+
+## 10. Licence
 
 MIT — see [LICENSE](LICENSE).

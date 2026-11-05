@@ -3,6 +3,8 @@ package com.cloudmonitor.domain
 import android.util.Log
 import com.cloudmonitor.shared.ExitEvidence
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -10,14 +12,42 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
+ * Outcome of a root probe.
+ *
+ * A device can be rooted without granting this app root access (for example when the user
+ * denies the Magisk/KernelSU prompt). The two states must never be conflated: only
+ * [rootGranted] permits privileged shell commands.
+ *
+ * @property suBinaryFound an `su` binary exists at one of the well-known locations. This
+ *   alone is NOT proof that the app has root access.
+ * @property rootGranted a privileged command actually returned `uid=0`. This is the only
+ *   condition under which commands are run through `su`.
+ * @property detail human-readable explanation shown in diagnostics/logcat.
+ */
+data class RootStatus(
+    val suBinaryFound: Boolean = false,
+    val rootGranted: Boolean = false,
+    val detail: String = "not checked yet",
+)
+
+/**
  * Tier-2 detection: ask the operating system whether a process is alive.
  *
- * This needs elevated privileges (root). On a stock phone the probe reports
- * [isAvailable] `false` and the detector falls back to tier 1.
+ * This needs elevated privileges (root or a shell that already runs as uid 0). On a stock
+ * phone [isAvailable] is `false` and the detector falls back to tier 1.
  */
 interface ProcessProbe {
-    /** Whether privileged shell access could be established. */
+    /** Cached result of the last detection. Reading it never performs I/O or blocks. */
     val isAvailable: Boolean
+
+    /** Full cached result, so the UI can distinguish "rooted device" from "app has root". */
+    val rootStatus: RootStatus
+
+    /**
+     * (Re)run detection on `Dispatchers.IO`. Safe to call repeatedly; negative results are
+     * throttled so a resumed screen does not spawn a shell every time.
+     */
+    suspend fun refreshRootStatus(): RootStatus
 
     /**
      * `true` when the process exists, `false` when it is definitely gone and `null` when
@@ -36,40 +66,132 @@ interface ProcessProbe {
  * Root-shell implementation of [ProcessProbe].
  *
  * Commands used:
+ *  * `id`                                  -> did the shell get uid 0?
  *  * `pidof <package>`                     -> is the process alive
  *  * `dumpsys activity exit-info <package>` -> why did it die
  *
- * `su` is used when present; otherwise a plain shell is tried, which works on devices that
- * were set up with an adb shell (some cloud-phone providers ship this).
+ * Detection is deliberately a separate, explicit, suspending step. The original code
+ * computed `rootAvailable` lazily from inside `runShellBlocking()` while
+ * `rootAvailable` was still `null`, so the very first `id` always ran through a plain
+ * shell and a rooted device was reported as "no privileges". Detection also used to run
+ * on whatever thread read [isAvailable] — including the main thread — because the getter
+ * started a blocking `ProcessBuilder` call.
  */
 @Singleton
 class RootProcessProbe @Inject constructor() : ProcessProbe {
 
-    private companion object {
+    companion object {
         const val TAG = "RootProcessProbe"
-        const val COMMAND_TIMEOUT_SECONDS = 3L
+        const val COMMAND_TIMEOUT_MILLIS = 3_000L
+        const val DRAIN_JOIN_MILLIS = 300L
+        const val MAX_OUTPUT_CHARS = 64 * 1024
+        const val NEGATIVE_RESULT_CACHE_MILLIS = 60_000L
+
+        /** Common `su` locations across Magisk, KernelSU, SuperSU and legacy root. */
+        val SU_PATHS = listOf(
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/debug_ramdisk/su",
+            "/vendor/bin/su",
+            "/system/sbin/su",
+            "/su/bin/su",
+            "/data/local/xbin/su",
+            "/data/local/bin/su",
+            "/data/adb/magisk/su",
+        )
+
         val PACKAGE_PATTERN = Regex("^[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+$")
+        val UID_ZERO = Regex("""(?:^|\s)uid=0(?:\D|$)""")
+
+        /** True only when `id` reports the root user (uid=0), not uid=0xxx. */
+        @JvmStatic
+        fun isUidZero(output: String): Boolean = UID_ZERO.containsMatchIn(output)
     }
 
+    private val detectionMutex = Mutex()
+
     @Volatile
-    private var rootAvailable: Boolean? = null
+    private var cachedStatus: RootStatus = RootStatus()
 
-    override val isAvailable: Boolean
-        get() = rootAvailable ?: synchronized(this) {
-            rootAvailable ?: detectRoot().also { rootAvailable = it }
-        }
+    /** Path used for privileged commands, null when no usable `su` binary was found. */
+    @Volatile
+    private var suCommand: String? = null
 
-    private fun detectRoot(): Boolean {
-        // `su` may live in different places depending on the root solution; try the common
-        // ones and fall back to a plain shell (adb-shell enabled devices).
-        val hasSu = File("/system/bin/su").exists() ||
-            File("/system/xbin/su").exists() ||
-            File("/sbin/su").exists() ||
-            File("/debug_ramdisk/su").exists()
-        if (hasSu) {
-            return runShellBlocking("id").contains("uid=0")
+    @Volatile
+    private var lastDetectionAt: Long = 0L
+
+    override val isAvailable: Boolean get() = cachedStatus.rootGranted
+
+    override val rootStatus: RootStatus get() = cachedStatus
+
+    override suspend fun refreshRootStatus(): RootStatus = withContext(Dispatchers.IO) {
+        detectionMutex.withLock {
+            val now = System.currentTimeMillis()
+            // A positive result is stable; a negative one is re-checked at most once a
+            // minute so that a repeatedly refreshed screen stays cheap.
+            if (cachedStatus.rootGranted) return@withLock cachedStatus
+            if (lastDetectionAt > 0L && now - lastDetectionAt < NEGATIVE_RESULT_CACHE_MILLIS) {
+                return@withLock cachedStatus
+            }
+            lastDetectionAt = now
+
+            val suPath = findSuBinary()
+
+            // Some cloud-phone images boot into an adb shell that already runs as uid 0.
+            // Keep that fallback: it is the only way to get tier 2 without a su binary.
+            val plainShell = execute(listOf("sh", "-c", "id"))
+            var granted = isUidZero(plainShell)
+            var detail = if (granted) {
+                "shell already runs as uid=0 (no su required)"
+            } else {
+                "plain shell is unprivileged"
+            }
+
+            if (suPath != null && !granted) {
+                val suOutput = execute(listOf(suPath, "-c", "id"))
+                granted = isUidZero(suOutput)
+                detail = when {
+                    granted -> "su at $suPath granted uid=0"
+                    suOutput.isBlank() -> "su at $suPath produced no output (denied, timed out or no binary access)"
+                    else -> "su at $suPath did not grant uid=0: ${suOutput.take(120).trim()}"
+                }
+            }
+
+            val status = RootStatus(
+                suBinaryFound = suPath != null,
+                rootGranted = granted,
+                detail = detail,
+            )
+            suCommand = suPath
+            cachedStatus = status
+            Log.i(TAG, "root detection: $status")
+            status
         }
-        return runShellBlocking("id").contains("uid=0")
+    }
+
+    /** Look for a `su` binary without assuming that its presence implies root access. */
+    private fun findSuBinary(): String? {
+        for (path in SU_PATHS) {
+            try {
+                if (File(path).exists()) return path
+            } catch (e: Throwable) {
+                Log.w(TAG, "cannot stat $path", e)
+            }
+        }
+        // Fall back to PATH. `command -v` is a shell builtin, so no external `which` is
+        // needed (some minimal Android images do not ship it).
+        val onPath = execute(listOf("sh", "-c", "command -v su 2>/dev/null"))
+            .lineSequence()
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("/") }
+        return onPath?.takeIf {
+            try {
+                File(it).exists()
+            } catch (_: Throwable) {
+                false
+            }
+        }
     }
 
     override suspend fun isProcessAlive(packageName: String): Boolean? {
@@ -114,20 +236,71 @@ class RootProcessProbe @Inject constructor() : ProcessProbe {
         runShellBlocking(command)
     }
 
-    /** Blocking variant, used from contexts that cannot suspend. */
+    /**
+     * Blocking variant. Uses `su` only when detection actually proved that `su` works.
+     * It never consults the value it is trying to determine, which was the original bug.
+     */
     private fun runShellBlocking(command: String): String {
-        val full = if (rootAvailable == true) "su -c '$command'" else command
-        return runCatching {
-            val process = ProcessBuilder("sh", "-c", full)
-                .redirectErrorStream(true)
-                .start()
-            if (!process.waitFor(COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                process.destroy()
-                return ""
+        val su = suCommand
+        val args = if (cachedStatus.rootGranted && su != null) {
+            // Passing the command as one argv element avoids shell quoting/injection.
+            listOf(su, "-c", command)
+        } else {
+            listOf("sh", "-c", command)
+        }
+        return execute(args)
+    }
+
+    /**
+     * Run a process with a hard timeout and a bounded output drain.
+     *
+     * The reader runs on a daemon thread because `waitFor()` alone deadlocks when the
+     * child writes more than the pipe buffer (a `dumpsys` dump easily exceeds 64 KiB).
+     */
+    private fun execute(args: List<String>, timeoutMillis: Long = COMMAND_TIMEOUT_MILLIS): String {
+        val process = try {
+            ProcessBuilder(args).redirectErrorStream(true).start()
+        } catch (e: Throwable) {
+            Log.w(TAG, "could not start ${args.firstOrNull()}: ${e.message}")
+            return ""
+        }
+
+        val sink = StringBuilder()
+        val drain = Thread {
+            try {
+                process.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val buffer = CharArray(2048)
+                    while (sink.length < MAX_OUTPUT_CHARS) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        sink.append(buffer, 0, count)
+                    }
+                }
+            } catch (_: Throwable) {
+                // Stream closed because the process was destroyed or exited.
             }
-            process.inputStream.bufferedReader().readText()
-        }.getOrElse {
-            Log.w(TAG, "shell command '$command' failed", it)
+        }
+        drain.isDaemon = true
+        drain.start()
+
+        return try {
+            val finished = process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                drain.join(DRAIN_JOIN_MILLIS)
+                Log.w(TAG, "command timed out after ${timeoutMillis}ms: ${args.firstOrNull()}")
+                ""
+            } else {
+                drain.join(DRAIN_JOIN_MILLIS)
+                sink.toString()
+            }
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            process.destroyForcibly()
+            Log.w(TAG, "command interrupted: ${args.firstOrNull()}")
+            ""
+        } catch (e: Throwable) {
+            Log.w(TAG, "command failed: ${args.firstOrNull()}", e)
             ""
         }
     }

@@ -1,6 +1,7 @@
 package com.cloudmonitor.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cloudmonitor.data.local.EventLogDao
@@ -17,6 +18,8 @@ import com.cloudmonitor.monitor.NotificationSnapshot
 import com.cloudmonitor.service.MonitorForegroundService
 import com.cloudmonitor.service.MonitorRuntime
 import com.cloudmonitor.service.PairingCodeProvider
+import com.cloudmonitor.service.WatchdogWorker
+import com.cloudmonitor.shared.CancellationGuard
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -50,6 +54,7 @@ data class MonitorUiState(
     val installedPackages: List<InstalledPackage> = emptyList(),
     val serviceRunning: Boolean = false,
     val privilegedProbeAvailable: Boolean = false,
+    val rootStatusDetail: String = "not checked yet",
     val oemAutostartScreenAvailable: Boolean = false,
     val message: String? = null,
 )
@@ -99,14 +104,27 @@ class MonitorViewModel @Inject constructor(
         refresh()
     }
 
+    private companion object {
+        const val TAG = "MonitorViewModel"
+    }
+
     /** Re-read everything that can change outside of the app (permissions, packages, ...). */
     fun refresh() {
         viewModelScope.launch {
+            // Detection runs on Dispatchers.IO inside the probe. Reading `isAvailable`
+            // alone is a cheap cached lookup and never blocks the main thread.
+            try {
+                probe.refreshRootStatus()
+            } catch (e: Throwable) {
+                CancellationGuard.rethrowCancellation(e)
+                Log.e(TAG, "root detection failed", e)
+            }
             val permissions = permissionStatus.current()
             _state.value = _state.value.copy(
                 permissions = permissions,
                 serviceRunning = MonitorForegroundService.isRunning,
                 privilegedProbeAvailable = probe.isAvailable,
+                rootStatusDetail = probe.rootStatus.detail,
                 oemAutostartScreenAvailable = permissionStatus.hasOemAutostartScreen(),
                 installedPackages = loadInstalledPackages(),
             )
@@ -115,11 +133,34 @@ class MonitorViewModel @Inject constructor(
         }
     }
 
-    fun setLabel(label: String) = viewModelScope.launch { prefs.setLabel(label) }
+    /** Surface a failed automatic startup (e.g. from boot or an update) to the user. */
+    fun reportStartupProblems() {
+        MonitorForegroundService.lastStartFailure?.let { message(it) }
+    }
+
+    fun setLabel(label: String) = viewModelScope.launch {
+        try {
+            prefs.setLabel(label)
+        } catch (e: Throwable) {
+            CancellationGuard.rethrowCancellation(e)
+            message("Could not save the name")
+            Log.e(TAG, "could not persist label", e)
+        }
+    }
 
     fun setApiKey(key: String) = viewModelScope.launch {
-        prefs.setApiKey(key.trim())
-        message("API key saved")
+        try {
+            prefs.setApiKey(key.trim())
+            message("API key saved")
+        } catch (e: Throwable) {
+            CancellationGuard.rethrowCancellation(e)
+            // An invalidated Android Keystore key must never crash the settings screen.
+            message(
+                "Could not save the API key (device encryption key unavailable). " +
+                    "Please re-enter it; if it keeps failing, clear app data and try again.",
+            )
+            Log.e(TAG, "could not persist API key", e)
+        }
     }
 
     fun setHeartbeatInterval(seconds: Int) = viewModelScope.launch {
@@ -128,10 +169,16 @@ class MonitorViewModel @Inject constructor(
     }
 
     fun toggleWatchedPackage(packageName: String, watched: Boolean) = viewModelScope.launch {
-        val current = prefs.current().watchedPackages
-        val updated = if (watched) current + packageName else current - packageName
-        prefs.setWatchedPackages(updated)
-        runtime.runScan()
+        try {
+            val current = prefs.current().watchedPackages
+            val updated = if (watched) current + packageName else current - packageName
+            prefs.setWatchedPackages(updated)
+            runtime.runScan()
+        } catch (e: Throwable) {
+            CancellationGuard.rethrowCancellation(e)
+            message("Could not update the watched apps: ${e.message ?: "unknown error"}")
+            Log.e(TAG, "watched package update failed", e)
+        }
     }
 
     /** Use a notification discovered by the inspector as the Discord screen-share target. */
@@ -156,16 +203,54 @@ class MonitorViewModel @Inject constructor(
     }
 
     fun startService() {
-        MonitorForegroundService.start(context)
-        com.cloudmonitor.service.WatchdogWorker.schedule(context)
-        message("Monitor started")
-        refresh()
+        val outcome = MonitorForegroundService.start(context)
+        if (!outcome.requested) {
+            // The platform refused the start (Android 12+ background restriction, missing
+            // permission, ...). Never report success.
+            _state.value = _state.value.copy(serviceRunning = false)
+            message(outcome.message)
+            return
+        }
+        WatchdogWorker.schedule(context)
+        viewModelScope.launch {
+            // startForegroundService() only requests a start. Wait for onCreate() to
+            // confirm that startForeground() actually succeeded before saying "started".
+            var waited = 0
+            while (waited < 2_000 && !MonitorForegroundService.isRunning) {
+                delay(150)
+                waited += 150
+            }
+            val failure = MonitorForegroundService.lastStartFailure
+            when {
+                MonitorForegroundService.isRunning && failure == null ->
+                    message(outcome.message.ifBlank { "Monitor started" })
+                failure != null -> message(failure)
+                else -> message(
+                    "The monitor did not start. Android may have blocked the foreground " +
+                        "service; check battery optimisation and the notification permission.",
+                )
+            }
+            refresh()
+        }
     }
 
     fun stopService() {
-        MonitorForegroundService.stop(context)
-        message("Monitor stopped")
-        refresh()
+        val outcome = MonitorForegroundService.stop(context)
+        viewModelScope.launch {
+            var waited = 0
+            while (waited < 1_500 && MonitorForegroundService.isRunning) {
+                delay(150)
+                waited += 150
+            }
+            message(
+                if (MonitorForegroundService.isRunning) {
+                    "Could not stop the monitor: ${outcome.message}"
+                } else {
+                    outcome.message
+                },
+            )
+            refresh()
+        }
     }
 
     fun sendHeartbeatNow() = viewModelScope.launch {
@@ -180,6 +265,19 @@ class MonitorViewModel @Inject constructor(
 
     private fun message(text: String) {
         _state.value = _state.value.copy(message = text)
+    }
+
+    fun clearMessage() {
+        _state.value = _state.value.copy(message = null)
+    }
+
+    /** Called when the user denies POST_NOTIFICATIONS (including permanently). */
+    fun reportNotificationPermissionDenied() {
+        message(
+            "Notification permission denied. Outage notifications and the ongoing monitor " +
+                "status will be hidden. Enable it in Settings → Apps → Cloud Monitor → " +
+                "Notifications (Android 13+ / Android 16).",
+        )
     }
 
     private fun loadInstalledPackages(): List<InstalledPackage> {

@@ -11,6 +11,7 @@ import com.cloudmonitor.data.repo.IncidentTracker
 import com.cloudmonitor.di.PermissionStatusProvider
 import com.cloudmonitor.domain.DeathDetector
 import com.cloudmonitor.domain.DetectionOutcome
+import com.cloudmonitor.domain.ProcessProbe
 import com.cloudmonitor.monitor.AnrReporter
 import com.cloudmonitor.monitor.DiscordConfig
 import com.cloudmonitor.monitor.DiscordShareTracker
@@ -19,6 +20,7 @@ import com.cloudmonitor.monitor.NotificationEventBus
 import com.cloudmonitor.monitor.ShareEvent
 import com.cloudmonitor.monitor.UsageStatsMonitor
 import com.cloudmonitor.net.ConnectivityObserver
+import com.cloudmonitor.shared.CancellationGuard
 import com.cloudmonitor.shared.ErrorCode
 import com.cloudmonitor.shared.dto.EventDto
 import com.cloudmonitor.shared.dto.EventType
@@ -26,6 +28,7 @@ import com.cloudmonitor.shared.dto.HeartbeatDto
 import com.cloudmonitor.shared.dto.PermissionStateDto
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -58,6 +61,7 @@ class MonitorRuntime @Inject constructor(
     private val permissionStatus: PermissionStatusProvider,
     private val pairing: PairingCodeProvider,
     private val usage: UsageStatsMonitor,
+    private val probe: ProcessProbe,
 ) {
 
     companion object {
@@ -81,15 +85,37 @@ class MonitorRuntime @Inject constructor(
         this.scope = scope
         running = true
 
+        // One root job owns every loop. Initialisation is awaited BEFORE the loops start,
+        // and structured concurrency guarantees that cancelling this job cancels them all.
+        // This also fixes the "device id is never created" bug: without calling
+        // prefs.deviceId() the settings.deviceId field stays blank, so every heartbeat and
+        // every event is silently dropped by the isBlank() guards below.
         jobs = listOf(
-            scope.launch { notificationLoop() },
-            scope.launch { shareLoop() },
-            scope.launch { shareStateLoop() },
-            scope.launch { detectionLoop() },
-            scope.launch { heartbeatLoop() },
-            scope.launch { flushLoop() },
             scope.launch {
-                anrReporter.anrEvents.collect { detector.onAnrObserved(it) }
+                try {
+                    prefs.deviceId()
+                } catch (e: Throwable) {
+                    CancellationGuard.rethrowCancellation(e)
+                    Log.e(TAG, "could not initialise the device id", e)
+                }
+                try {
+                    probe.refreshRootStatus()
+                } catch (e: Throwable) {
+                    CancellationGuard.rethrowCancellation(e)
+                    Log.e(TAG, "root detection failed", e)
+                }
+
+                coroutineScope {
+                    launch { notificationLoop() }
+                    launch { shareLoop() }
+                    launch { shareStateLoop() }
+                    launch { detectionLoop() }
+                    launch { heartbeatLoop() }
+                    launch { flushLoop() }
+                    launch {
+                        anrReporter.anrEvents.collect { detector.onAnrObserved(it) }
+                    }
+                }
             },
         )
 
@@ -169,7 +195,10 @@ class MonitorRuntime @Inject constructor(
     private suspend fun detectionLoop() {
         while (scope?.isActive == true) {
             delay(DeathDetector.SCAN_INTERVAL_SECONDS * 1000L)
-            runCatching { runScan() }.onFailure { Log.w(TAG, "detection scan failed", it) }
+            // runCatching {} would swallow CancellationException and keep the loop alive
+            // after the service was stopped. Preserve structured cancellation instead.
+            CancellationGuard.runCatchingPreservingCancellation { runScan() }
+                .onFailure { Log.w(TAG, "detection scan failed", it) }
         }
     }
 
@@ -178,14 +207,16 @@ class MonitorRuntime @Inject constructor(
             val settings = prefs.current()
             val interval = settings.heartbeatIntervalSec.coerceAtLeast(15) * 1000L
             delay(interval)
-            runCatching { sendHeartbeat() }.onFailure { Log.w(TAG, "heartbeat failed", it) }
+            CancellationGuard.runCatchingPreservingCancellation { sendHeartbeat() }
+                .onFailure { Log.w(TAG, "heartbeat failed", it) }
         }
     }
 
     private suspend fun flushLoop() {
         while (scope?.isActive == true) {
             delay(FLUSH_RETRY_MILLIS)
-            runCatching { events.flush() }.onFailure { Log.w(TAG, "flush failed", it) }
+            CancellationGuard.runCatchingPreservingCancellation { events.flush() }
+                .onFailure { Log.w(TAG, "flush failed", it) }
         }
     }
 
@@ -334,6 +365,7 @@ class MonitorRuntime @Inject constructor(
 
     private suspend fun emitRecoveredForPackage(packageName: String) {
         val settings = prefs.current()
+        if (settings.deviceId.isBlank()) return
         val open = tracker.openIncidentsFor(packageName)
         for (incident in open) {
             val event = EventDto(

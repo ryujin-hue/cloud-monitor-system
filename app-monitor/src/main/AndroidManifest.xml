@@ -28,11 +28,12 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- NotificationListenerService needs this permission on the service declaration. -->
-    <uses-permission android:name="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" />
-
-    <!-- AccessibilityService (optional, ANR evidence only). -->
-    <uses-permission android:name="android.permission.BIND_ACCESSIBILITY_SERVICE" />
+    <!--
+        BIND_NOTIFICATION_LISTENER_SERVICE and BIND_ACCESSIBILITY_SERVICE are signature
+        permissions used as android:permission on the <service> declarations below, NOT
+        <uses-permission> entries. Declaring them here was misleading and produced lint
+        warnings without granting anything.
+    -->
 
     <application
         android:name=".MonitorApplication"
@@ -44,7 +45,8 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.CloudMonitor"
-        tools:targetApi="34">
+        android:enableOnBackInvokedCallback="true"
+        tools:targetApi="36">
 
         <activity
             android:name=".ui.MainActivity"
@@ -102,13 +104,23 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- Reboot of the cloud phone. -->
+        <!--
+            Reboot of the cloud phone.
+
+            exported=false + RECEIVE_BOOT_COMPLETED prevents a third-party app from
+            forging an explicit broadcast (the HTC/QUICKBOOT actions are not protected
+            broadcasts) and thereby triggering a foreground-service start. BOOT_COMPLETED,
+            LOCKED_BOOT_COMPLETED and MY_PACKAGE_REPLACED are still delivered to a
+            non-exported receiver by the system.
+        -->
         <receiver
             android:name=".service.BootReceiver"
             android:enabled="true"
-            android:exported="true">
+            android:exported="false"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
             </intent-filter>

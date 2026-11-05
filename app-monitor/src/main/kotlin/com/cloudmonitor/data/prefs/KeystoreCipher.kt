@@ -1,6 +1,7 @@
 package com.cloudmonitor.data.prefs
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import java.util.Base64
@@ -32,6 +33,11 @@ class KeystoreCipher @Inject constructor() {
         KeyStore.getInstance(KEYSTORE).apply { load(null) }
     }
 
+    /** True once a Keystore key was found to be permanently invalidated. */
+    @Volatile
+    var keyWasInvalidated: Boolean = false
+        private set
+
     private fun secretKey(): SecretKey {
         (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
 
@@ -50,9 +56,26 @@ class KeystoreCipher @Inject constructor() {
         return generator.generateKey()
     }
 
-    /** Encrypt [plaintext]; returns a base64 blob of `iv || ciphertext`. */
+    /**
+     * Encrypt [plaintext]; returns a base64 blob of `iv || ciphertext`.
+     *
+     * If the Keystore key was invalidated (lock-screen change, OS restore, biometry
+     * enrollment), drop the unusable alias and generate a fresh one instead of throwing
+     * into the settings screen.
+     */
     fun encrypt(plaintext: String): String {
         if (plaintext.isEmpty()) return ""
+        return try {
+            encryptOnce(plaintext)
+        } catch (e: Throwable) {
+            runCatching { keyStore.deleteEntry(KEY_ALIAS) }
+            // A second failure is propagated; the ViewModel catches it and asks the user
+            // to re-enter the key instead of crashing.
+            encryptOnce(plaintext)
+        }
+    }
+
+    private fun encryptOnce(plaintext: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val iv = cipher.iv
@@ -68,11 +91,12 @@ class KeystoreCipher @Inject constructor() {
      *
      * Returns `null` when the blob is corrupt or was encrypted with a different key (for
      * example after a factory reset of the Keystore), so callers can treat the value as
-     * "not configured" instead of crashing.
+     * "not configured" instead of crashing. An invalidated key is deleted, so the next
+     * [encrypt] generates a usable replacement.
      */
     fun decrypt(blob: String): String? {
         if (blob.isEmpty()) return ""
-        return runCatching {
+        return try {
             val raw = Base64.getDecoder().decode(blob)
             if (raw.size <= IV_LENGTH) return null
             val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -83,6 +107,12 @@ class KeystoreCipher @Inject constructor() {
             )
             val plain = cipher.doFinal(raw, IV_LENGTH, raw.size - IV_LENGTH)
             String(plain, Charsets.UTF_8)
-        }.getOrNull()
+        } catch (e: Throwable) {
+            if (e is KeyPermanentlyInvalidatedException) {
+                keyWasInvalidated = true
+                runCatching { keyStore.deleteEntry(KEY_ALIAS) }
+            }
+            null
+        }
     }
 }

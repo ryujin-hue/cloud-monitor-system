@@ -5,6 +5,7 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Process
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -53,16 +54,35 @@ class UsageStatsMonitor @Inject constructor(
     private val usageStatsManager: UsageStatsManager? =
         context.getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
 
-    /** Whether the user granted Usage Access to this app. */
+    /**
+     * Whether the user granted Usage Access to this app.
+     *
+     * `unsafeCheckOpNoThrow` was only added in API 29, but minSdk is 26. Calling it on
+     * Android 8.0/8.1 throws `NoSuchMethodError`. Use the older `checkOpNoThrow` there
+     * (deprecated but present since API 19) and the current API on Q+.
+     */
     fun hasPermission(): Boolean {
         val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
             ?: return false
-        val mode = appOps.unsafeCheckOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            Process.myUid(),
-            context.packageName,
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
+        return try {
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (_: SecurityException) {
+            false
+        }
     }
 
     /**

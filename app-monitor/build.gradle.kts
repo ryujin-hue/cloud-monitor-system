@@ -36,12 +36,17 @@ val backendBaseUrl: String = (
 
 android {
     namespace = "com.cloudmonitor"
+    // compileSdk is 37 because the pinned AndroidX / Compose / Ktor releases publish AAR
+    // metadata requiring minCompileSdk 37 (see gradle.properties). It only affects which
+    // APIs are visible while compiling; no API introduced after 36 is used in the source.
+    // targetSdk stays 36 so Android 16 (API 36) remains the primary RUNTIME target and
+    // the app opts into the Android 16 behaviour changes documented in README.md.
     compileSdk = 37
 
     defaultConfig {
         applicationId = "com.cloudmonitor" // NEVER change: in-place updates depend on it
         minSdk = 26
-        targetSdk = 37
+        targetSdk = 36
         versionCode = appVersionCode
         versionName = appVersionName
 

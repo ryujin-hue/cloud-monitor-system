@@ -1,10 +1,14 @@
 package com.cloudmonitor.di
 
+import android.annotation.SuppressLint
+import android.app.AppOpsManager
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -51,14 +55,30 @@ class PermissionStatusProvider @Inject constructor(
             false
         }
 
+        // `unsafeCheckOpNoThrow` is API 29+, but minSdk is 26. On Android 8.0/8.1 it throws
+        // NoSuchMethodError, which used to be swallowed by the broad catch below and made the
+        // app silently report "Usage Access not granted" even when it was granted. Use the
+        // API-19 `checkOpNoThrow` on those versions instead.
         val usageAccess = try {
-            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? android.app.AppOpsManager
-            appOps?.unsafeCheckOpNoThrow(
-                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
-                android.os.Process.myUid(),
-                context.packageName,
-            ) == android.app.AppOpsManager.MODE_ALLOWED
-        } catch (_: Throwable) {
+            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
+            val mode = if (appOps == null) {
+                null
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    context.packageName,
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (_: SecurityException) {
             false
         }
 
@@ -83,7 +103,15 @@ class PermissionStatusProvider @Inject constructor(
         )
     }
 
-    /** Intent that opens the "Notification access" screen of this app. */
+    /**
+     * Intent that opens the "Notification access" screen of this app.
+     *
+     * `EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME` is only public from API 30, but it is a
+     * compile-time inlined String constant, so referencing it on API 26-29 does not throw.
+     * Those versions simply ignore the extra and show the full list, where the user finds
+     * this app manually (documented in TROUBLESHOOTING.md).
+     */
+    @SuppressLint("InlinedApi")
     fun notificationAccessIntent(): Intent =
         Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
             putExtra(

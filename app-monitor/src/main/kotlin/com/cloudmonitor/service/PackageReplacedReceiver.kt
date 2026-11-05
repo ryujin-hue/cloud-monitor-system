@@ -21,6 +21,12 @@ class PackageReplacedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         Log.i(TAG, "package replaced, restarting monitor")
-        MonitorForegroundService.start(context)
+        val outcome = MonitorForegroundService.start(context)
+        if (!outcome.requested) {
+            // MY_PACKAGE_REPLACED is an exemption from the Android 12+ background start
+            // restriction, but OEMs can be stricter. Never claim the monitor is running
+            // when the platform refused the start.
+            Log.w(TAG, "restart after update was refused: ${outcome.message}")
+        }
     }
 }

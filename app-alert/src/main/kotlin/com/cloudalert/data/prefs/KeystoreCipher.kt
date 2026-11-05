@@ -1,6 +1,7 @@
 package com.cloudalert.data.prefs
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
 import java.util.Base64
@@ -32,6 +33,11 @@ class KeystoreCipher @Inject constructor() {
         KeyStore.getInstance(KEYSTORE).apply { load(null) }
     }
 
+    /** True once a Keystore key was found to be permanently invalidated. */
+    @Volatile
+    var keyWasInvalidated: Boolean = false
+        private set
+
     private fun secretKey(): SecretKey {
         (keyStore.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
@@ -49,8 +55,24 @@ class KeystoreCipher @Inject constructor() {
         return generator.generateKey()
     }
 
+    /**
+     * Encrypt [plaintext]. If the Keystore key was invalidated (lock-screen change, OS
+     * restore, biometry enrollment), drop the unusable alias and transparently create a
+     * fresh one instead of throwing into the settings screen.
+     */
     fun encrypt(plaintext: String): String {
         if (plaintext.isEmpty()) return ""
+        return try {
+            encryptOnce(plaintext)
+        } catch (e: Throwable) {
+            // A second failure is propagated: the ViewModel catches it and asks the user
+            // to re-enter the key rather than crashing.
+            runCatching { keyStore.deleteEntry(KEY_ALIAS) }
+            encryptOnce(plaintext)
+        }
+    }
+
+    private fun encryptOnce(plaintext: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val iv = cipher.iv
@@ -61,9 +83,15 @@ class KeystoreCipher @Inject constructor() {
         return Base64.getEncoder().encodeToString(blob)
     }
 
+    /**
+     * Decrypt a blob produced by [encrypt]. Returns `null` when the blob is corrupt or
+     * was encrypted with a different/invalidated key, so callers treat the value as
+     * "not configured" instead of crashing. An invalidated key is deleted so that the
+     * next [encrypt] generates a usable replacement.
+     */
     fun decrypt(blob: String): String? {
         if (blob.isEmpty()) return ""
-        return runCatching {
+        return try {
             val raw = Base64.getDecoder().decode(blob)
             if (raw.size <= IV_LENGTH) return null
             val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -73,6 +101,12 @@ class KeystoreCipher @Inject constructor() {
                 GCMParameterSpec(TAG_LENGTH_BITS, raw, 0, IV_LENGTH),
             )
             String(cipher.doFinal(raw, IV_LENGTH, raw.size - IV_LENGTH), Charsets.UTF_8)
-        }.getOrNull()
+        } catch (e: Throwable) {
+            if (e is KeyPermanentlyInvalidatedException) {
+                keyWasInvalidated = true
+                runCatching { keyStore.deleteEntry(KEY_ALIAS) }
+            }
+            null
+        }
     }
 }

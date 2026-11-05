@@ -1,5 +1,6 @@
 package com.cloudmonitor.data.remote
 
+import com.cloudmonitor.shared.CancellationGuard
 import com.cloudmonitor.shared.dto.EventBatchDto
 import com.cloudmonitor.shared.dto.HeartbeatDto
 import io.ktor.client.HttpClient
@@ -63,13 +64,17 @@ class MonitorApi @Inject constructor(
                 else -> ApiResult.ServerError(response.status.value, response.bodyAsText())
             }
         } catch (e: Throwable) {
+            // A cancelled heartbeat/event upload must stay cancelled. Turning it into a
+            // NetworkError would make the caller believe delivery failed and retry forever.
+            CancellationGuard.rethrowCancellation(e)
             ApiResult.NetworkError(e)
         }
     }
 
     private suspend fun HttpResponse.bodyAsText(): String = try {
         body<String>()
-    } catch (_: Throwable) {
+    } catch (e: Throwable) {
+        CancellationGuard.rethrowCancellation(e)
         ""
     }
 }

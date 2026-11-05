@@ -1,5 +1,6 @@
 package com.cloudalert.data.remote
 
+import com.cloudmonitor.shared.CancellationGuard
 import com.cloudmonitor.shared.dto.ApiErrorDto
 import com.cloudmonitor.shared.dto.EventsResponseDto
 import com.cloudmonitor.shared.dto.RegisterRequestDto
@@ -66,6 +67,7 @@ class AlertApi @Inject constructor(
         val response = client.get(baseUrl + path) { header("x-api-key", apiKey) }
         interpret(response) { parse(response) }
     } catch (e: Throwable) {
+        CancellationGuard.rethrowCancellation(e)
         AlertApiResult.NetworkError(e)
     }
 
@@ -82,6 +84,7 @@ class AlertApi @Inject constructor(
         }
         interpret(response) { parse(response) }
     } catch (e: Throwable) {
+        CancellationGuard.rethrowCancellation(e)
         AlertApiResult.NetworkError(e)
     }
 

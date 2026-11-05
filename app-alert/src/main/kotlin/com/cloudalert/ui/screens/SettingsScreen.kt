@@ -33,6 +33,7 @@ fun SettingsScreen(
     onSaveLabel: (String) -> Unit,
     onRegister: () -> Unit,
     onPair: (String) -> Unit,
+    onOpenNotificationSettings: () -> Unit,
 ) {
     var key by remember(apiKey) { mutableStateOf(apiKey) }
     var name by remember(label) { mutableStateOf(label) }
@@ -120,6 +121,21 @@ fun SettingsScreen(
                         Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
                     }
                 }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Notifications", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Android 13+ (including Android 16) requires the notification permission " +
+                        "for outage alerts. It is requested only when you open the app and it " +
+                        "is still missing. If you denied it permanently, open the app's " +
+                        "notification settings here. Cloud Alert never needs notification " +
+                        "access to other apps, usage access or accessibility.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Button(onClick = onOpenNotificationSettings) { Text("Open notification settings") }
             }
         }
     }

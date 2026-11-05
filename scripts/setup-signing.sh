@@ -64,24 +64,33 @@ echo "Keystore created."
 echo
 echo "=== ADD THESE AS GITHUB SECRETS (never commit the keystore) ==="
 echo
-echo "  KEYSTORE_BASE64   = $(base64 -w0 "${OUT_JKS}" | head -c 60)... (full value below)"
-echo
+# Never print passwords/keys to stdout: doing so would leak them into CI logs, shell
+# history and screen shares. Write them to a 0600 file outside version control instead.
 base64 -w0 "${OUT_JKS}" > "${OUT_JKS}.base64"
-echo "The full base64 blob was written to ${OUT_JKS}.base64"
+SECRETS_FILE="${OUT_JKS}.secrets"
+umask 077
+{
+  echo "KEYSTORE_PASSWORD=${STORE_PASSWORD}"
+  echo "KEY_ALIAS=${ALIAS}"
+  echo "KEY_PASSWORD=${KEY_PASSWORD}"
+} > "${SECRETS_FILE}"
+chmod 600 "${SECRETS_FILE}"
+echo "  KEYSTORE_BASE64   -> full contents of ${OUT_JKS}.base64"
+echo "  KEYSTORE_PASSWORD -> ${SECRETS_FILE}"
+echo "  KEY_ALIAS         -> ${SECRETS_FILE}"
+echo "  KEY_PASSWORD      -> ${SECRETS_FILE}"
 echo
-echo "  KEYSTORE_PASSWORD = ${STORE_PASSWORD}"
-echo "  KEY_ALIAS         = ${ALIAS}"
-echo "  KEY_PASSWORD      = ${KEY_PASSWORD}"
-echo
-echo "Save these four values in your password manager AND in a local file OUTSIDE the repository."
-echo "If you lose them you can never publish an update for the already installed apps."
+echo "Secrets were written to ${SECRETS_FILE} (mode 600). Do NOT paste them into logs,"
+echo "issues, terminal history or source files. Back them up in a password manager"
+echo "OUTSIDE the repository. If you lose them you can never publish an update for the"
+echo "already installed apps."
 echo
 if command -v gh >/dev/null 2>&1; then
-  echo "Run this to upload them to GitHub (repository: <owner>/<repo>):"
-  echo "  gh secret set KEYSTORE_BASE64 < ${OUT_JKS}.base64"
-  echo "  gh secret set KEYSTORE_PASSWORD --body '${STORE_PASSWORD}'"
-  echo "  gh secret set KEY_ALIAS --body '${ALIAS}'"
-  echo "  gh secret set KEY_PASSWORD --body '${KEY_PASSWORD}'"
+  echo "Upload them with gh (values are read from the protected files, never echoed):"
+  echo "  gh secret set KEYSTORE_BASE64 < \"${OUT_JKS}.base64\""
+  echo "  gh secret set KEYSTORE_PASSWORD < <(sed -n 's/^KEYSTORE_PASSWORD=//p' \"${SECRETS_FILE}\")"
+  echo "  gh secret set KEY_ALIAS < <(sed -n 's/^KEY_ALIAS=//p' \"${SECRETS_FILE}\")"
+  echo "  gh secret set KEY_PASSWORD < <(sed -n 's/^KEY_PASSWORD=//p' \"${SECRETS_FILE}\")"
   echo
 fi
 

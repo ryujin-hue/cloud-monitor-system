@@ -65,6 +65,11 @@ fun DashboardScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
+                        "Root check: ${state.rootStatusDetail}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
                         "Queued events: ${state.queueSize}",
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -89,7 +94,7 @@ fun DashboardScreen(
                     )
                     Text(
                         "Type this 6-digit code in Cloud Alert to subscribe to this cloud phone. " +
-                            "The code expires after 15 minutes.",
+                            "The code expires after 30 minutes.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                     OutlinedButton(onClick = onRotateCode) { Text("New code") }

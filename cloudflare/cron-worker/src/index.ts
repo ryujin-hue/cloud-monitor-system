@@ -1,3 +1,4 @@
+import { constantTimeEquals } from "../../src/auth";
 import { incidentKey } from "../../src/kvKeys";
 import { reduceIncident } from "../../src/incidents";
 import { pushEvent } from "../../src/push";
@@ -50,17 +51,27 @@ export default {
   },
 
   /**
-   * Manual trigger: `GET https://cloud-monitor-cron.<account>.workers.dev/?key=<CRON_SECRET>`.
+   * Manual trigger:
+   *   curl -H "x-cron-secret: <CRON_SECRET>" \
+   *     https://cloud-monitor-cron.<account>.workers.dev/
+   *
+   * The secret belongs in a HEADER, not in the URL: query strings end up in access logs,
+   * browser history and Referer headers. The legacy `?key=` / `x-api-key` forms are still
+   * accepted for compatibility but should not be used.
    *
    * The scheduled run every five minutes is the normal path; this endpoint exists so the
-   * scan can be forced (for example right after a phone was added) and so the operator can
-   * check the backend by hand.
+   * scan can be forced (for example right after a phone was added).
    */
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const secret = env.CRON_SECRET;
-    const provided = url.searchParams.get("key") ?? request.headers.get("x-api-key") ?? "";
-    if (!secret || provided !== secret) {
+    const provided =
+      request.headers.get("x-cron-secret") ??
+      request.headers.get("x-api-key") ??
+      url.searchParams.get("key") ??
+      "";
+    // Constant-time comparison: `!==` leaks how many leading characters matched.
+    if (!secret || !constantTimeEquals(provided, secret)) {
       return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), {
         status: 401,
         headers: { "content-type": "application/json" },

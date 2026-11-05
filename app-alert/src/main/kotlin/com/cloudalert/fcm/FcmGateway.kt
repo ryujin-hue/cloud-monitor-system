@@ -2,6 +2,7 @@ package com.cloudalert.fcm
 
 import android.content.Context
 import android.util.Log
+import com.cloudmonitor.shared.CancellationGuard
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -48,18 +49,30 @@ class FirebaseFcmGateway @Inject constructor(
 
     override suspend fun currentToken(): String? {
         val service = messaging ?: return null
-        return runCatching {
+        return try {
             suspendCancellableCoroutine { continuation ->
                 service.token.addOnCompleteListener { task ->
+                    // The callback can arrive after the coroutine was cancelled; resume only
+                    // while it is still active to avoid an "already resumed" crash.
+                    if (!continuation.isActive) return@addOnCompleteListener
                     if (task.isSuccessful) continuation.resume(task.result)
                     else continuation.resume(null)
                 }
             }
-        }.getOrNull()
+        } catch (e: Throwable) {
+            CancellationGuard.rethrowCancellation(e)
+            Log.w(TAG, "could not read the FCM token: ${e.message}")
+            null
+        }
     }
 
     override suspend fun deleteToken() {
-        runCatching { messaging?.deleteToken() }
+        try {
+            messaging?.deleteToken()
+        } catch (e: Throwable) {
+            CancellationGuard.rethrowCancellation(e)
+            Log.w(TAG, "could not delete the FCM token", e)
+        }
     }
 }
 

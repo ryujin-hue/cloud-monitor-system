@@ -55,7 +55,12 @@ class AlertFirebaseMessagingService : FirebaseMessagingService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onMessageReceived(message: RemoteMessage) {
-        Log.i(TAG, "push received: ${message.data}")
+        // Never log the full payload: it contains device ids, labels and alert text.
+        Log.i(
+            TAG,
+            "push received: type=${message.data[KEY_TYPE] ?: "-"} " +
+                "eventId=${message.data[KEY_EVENT_ID] ?: "-"}",
+        )
         notifier.notify(message.data)
     }
 

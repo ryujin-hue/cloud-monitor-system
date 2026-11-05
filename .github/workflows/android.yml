@@ -45,6 +45,10 @@ jobs:
           # from the SDK repository and makes the action fail. The platforms and the
           # build tools are listed explicitly instead.
           # The action splits this input on SPACES, so it has to be one single line.
+          # compileSdk is 37 (required by the AAR metadata of the pinned AndroidX /
+          # Compose / Ktor releases), while targetSdk stays 36 (Android 16). The API 37
+          # platforms + build-tools are needed at compile time; API 36 is kept for the
+          # emulator job below and for lint's targetSdk analysis.
           packages: platform-tools platforms;android-36 platforms;android-37.0 platforms;android-37.2 build-tools;36.0.0 build-tools;37.0.0
 
       - name: Set up Gradle
@@ -69,8 +73,14 @@ jobs:
       - name: Show the version this build will publish
         run: ./scripts/version.sh
 
+      - name: Clean and assemble debug APKs
+        run: ./gradlew --stacktrace clean assembleDebug
+
       - name: Unit tests
         run: ./gradlew --stacktrace test
+
+      - name: Lint
+        run: ./gradlew --stacktrace lint
 
       - name: Assemble the signed release APKs
         run: ./gradlew --stacktrace assembleRelease
@@ -136,6 +146,8 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
         with:
+          # The update-proof job builds the APKs too, so compileSdk 37 must be
+          # available; the emulator itself runs API 36 (Android 16).
           packages: platform-tools platforms;android-36 platforms;android-37.0 platforms;android-37.2 build-tools;36.0.0 build-tools;37.0.0
       - uses: gradle/actions/setup-gradle@v4
       - name: Enable KVM
@@ -147,6 +159,6 @@ jobs:
       - name: Run the emulator and install both APKs
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 36
           arch: x86_64
           script: ./scripts/verify-update.sh --with-device

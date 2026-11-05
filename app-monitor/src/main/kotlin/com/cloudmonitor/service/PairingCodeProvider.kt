@@ -4,9 +4,9 @@ import com.cloudmonitor.data.prefs.MonitorPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.security.SecureRandom
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.random.Random
 
 /**
  * Generates and rotates the 6-digit pairing code.
@@ -68,7 +68,14 @@ class PairingCodeProvider @Inject constructor(
         _code.value = null
     }
 
+    /**
+     * The code is a short-lived bearer credential: it must come from a CSPRNG, not from
+     * `kotlin.random.Random` (a seeded PRNG whose output can be predicted from earlier
+     * codes). The backend still needs rate limiting; see docs/TROUBLESHOOTING.md.
+     */
     private fun generateCode(): String = buildString {
-        repeat(DIGITS) { append(Random.nextInt(0, 10)) }
+        repeat(DIGITS) { append(secureRandom.nextInt(10)) }
     }
+
+    private val secureRandom = SecureRandom()
 }

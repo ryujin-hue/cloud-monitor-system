@@ -1,4 +1,4 @@
-import { isAuthorized } from "../../src/auth";
+import { constantTimeEquals, isAuthorized } from "../../src/auth";
 import { errorResponse, jsonResponse, methodNotAllowed } from "../../src/cors";
 import { listDeviceRecords, readSubscriptions, writeSubscriptions } from "../../src/state";
 import type { Env, RegisterRequest, RegisterResponse } from "../../src/types";
@@ -63,6 +63,18 @@ export const onRequestPost = async ({
 
   let message = "Registered.";
   if (body.pairingCode) {
+    // A 6-digit code is a short secret. Without a limiter it can be brute-forced; cap the
+    // number of attempts per alert device and per time window (best effort: KV is
+    // eventually consistent). For a hard guarantee also enable Cloudflare Rate Limiting.
+    if (await tooManyPairingAttempts(env, body.alertDeviceId)) {
+      return errorResponse(
+        request,
+        env,
+        429,
+        "rate_limited",
+        "Too many pairing attempts. Please wait a few minutes and try again.",
+      );
+    }
     const code = body.pairingCode.trim();
     const match = await findDeviceByPairingCode(env, code, now);
     if (match) {
@@ -102,11 +114,41 @@ async function findDeviceByPairingCode(
   // 1,000 list requests/day of the free plan, and it always sees the newest devices.
   const devices = await listDeviceRecords(env);
   for (const device of devices) {
-    if (device.pairingCode !== code) continue;
+    if (!device.pairingCode) continue;
+    // Constant-time comparison: a plain `!==` leaks how many digits matched.
+    if (!constantTimeEquals(device.pairingCode, code)) continue;
     if ((device.pairingExpiresAt ?? 0) <= now) continue;
     return { deviceId: device.deviceId, label: device.label };
   }
   return null;
+}
+
+/** Best-effort pairing-attempt limiter. KV is eventually consistent, not a lock. */
+async function tooManyPairingAttempts(env: Env, alertDeviceId: string): Promise<boolean> {
+  const limit = 10;
+  const windowMs = 10 * 60 * 1000;
+  const key = `cloud-monitor:pairattempts:${alertDeviceId}`;
+  const now = Date.now();
+
+  let windowStart = now;
+  let count = 0;
+  try {
+    const raw = await env.KV.get(key);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { windowStart?: number; count?: number };
+      const sameWindow =
+        typeof parsed.windowStart === "number" && now - parsed.windowStart < windowMs;
+      windowStart = sameWindow ? parsed.windowStart! : now;
+      count = sameWindow ? (parsed.count ?? 0) : 0;
+    }
+  } catch {
+    // A corrupt/unavailable counter must not break registration; start a new window.
+  }
+  count += 1;
+  await env.KV.put(key, JSON.stringify({ windowStart, count }), {
+    expirationTtl: Math.ceil(windowMs / 1000),
+  });
+  return count > limit;
 }
 
 export const onRequestGet = async ({ request, env }: { request: Request; env: Env }) =>

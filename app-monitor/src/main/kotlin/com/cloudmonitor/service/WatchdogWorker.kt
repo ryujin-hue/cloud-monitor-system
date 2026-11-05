@@ -58,8 +58,21 @@ class WatchdogWorker(
             Log.d(TAG, "monitor service is alive")
             return Result.success()
         }
-        Log.w(TAG, "monitor service is NOT running, restarting it")
-        MonitorForegroundService.start(applicationContext)
+        Log.w(TAG, "monitor service is NOT running, requesting a restart")
+        val outcome = MonitorForegroundService.start(applicationContext)
+        if (!outcome.requested) {
+            // A WorkManager worker is NOT one of the Android 12+ background-start
+            // exemptions. Unless the user disabled battery optimisation for the app, the
+            // platform will refuse this start. Retrying forever would only burn the
+            // Android 16 job quota, so record the reason and let the user restart the
+            // monitor from the app (which is a user-visible, exempt action).
+            Log.w(
+                TAG,
+                "watchdog restart refused by Android: ${outcome.message}. " +
+                    "The user must open Cloud Monitor and tap Start, or grant an " +
+                    "unrestricted battery setting.",
+            )
+        }
         return Result.success()
     }
 }

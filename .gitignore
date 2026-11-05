@@ -4,7 +4,9 @@
 # The release signing key. Losing it means no APK can ever update an installed one.
 release-keystore.jks
 release-keystore.jks.base64
+release-keystore.jks.secrets
 *.jks
+*.jks.secrets
 *.keystore
 keystore.properties
 
