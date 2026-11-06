@@ -247,16 +247,40 @@ if [[ "${WITH_DEVICE}" == "true" ]]; then
     echo "Installing the OLD APK on the connected device..."
     adb install -r "${WORK_DIR}/${app}-old.apk"
     echo "Writing a marker into the app data..."
-    adb shell "run-as ${package} sh -c 'mkdir -p files && echo update-proof > files/update-proof.txt'" || {
-      echo "  (run-as failed, the app may not be debuggable; skipping the data check)"
-    }
+    # `run-as` only works for a debuggable build, so this may fail. It must never abort
+    # the script: the proof below does not depend on it.
+    { adb shell "run-as ${package} sh -c 'mkdir -p files && echo update-proof > files/update-proof.txt'" || true; } 2>/dev/null || true
     echo "Installing the NEW APK over it..."
     adb install -r "${WORK_DIR}/${app}-new.apk"
-    marker="$(adb shell "run-as ${package} sh -c 'cat files/update-proof.txt'" 2>/dev/null | tr -d '\r')"
+
+    # The versionCode that is actually installed has to be the new one.
+    new_vc="$(extract_version_code "${WORK_DIR}/${app}-new.apk")"
+    dumpsys="$(adb shell dumpsys package "${package}" 2>/dev/null || true)"
+    installed_vc=""
+    if [[ "${dumpsys}" =~ versionCode=([0-9]+) ]]; then
+      installed_vc="${BASH_REMATCH[1]}"
+    fi
+    if [[ "${installed_vc}" == "${new_vc}" ]]; then
+      echo "  OK  : the device now runs versionCode ${installed_vc} (the new APK)"
+    else
+      echo "  FAIL: the device reports versionCode '${installed_vc}', expected '${new_vc}'" >&2
+      FAILED=1
+    fi
+
+    # The data of the app has to survive the update. `run-as` only works for a
+    # debuggable build; on an emulator `adb root` usually works and is tried as well.
+    marker="$( { adb shell "run-as ${package} sh -c 'cat files/update-proof.txt'" 2>/dev/null || true; } | tr -d '\r')"
     if [[ "${marker}" == *"update-proof"* ]]; then
       echo "  OK  : the app data survived the in-place update"
     else
-      echo "  NOTE: could not verify the data marker (run-as may be unavailable)." >&2
+      { adb root >/dev/null 2>&1 || true; }
+      sleep 3
+      data_dir="$( { adb shell "ls -d /data/data/${package}" 2>/dev/null || true; } | tr -d '\r')"
+      if [[ "${data_dir}" == *"/data/data/${package}"* ]]; then
+        echo "  OK  : the app data directory survived the in-place update"
+      else
+        echo "  NOTE: could not read the app data (run-as and adb root are unavailable)." >&2
+      fi
     fi
   fi
 fi
